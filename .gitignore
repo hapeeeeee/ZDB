@@ -17,6 +17,7 @@
 *.dll
 build
 .vscode
+bin
 
 # Fortran module files
 *.mod
