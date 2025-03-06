@@ -1,49 +1,20 @@
-#include <algorithm>
 #include <editline/readline.h>
-#include <iostream>
-#include <libzdb/libzdb.hpp>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <sys/ptrace.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <libzdb/process.hpp>
+#include <string.h>
 #include <vector>
+
 namespace {
-    pid_t attach(int argc, char **argv) {
-        pid_t pid = 0;
+    std::unique_ptr<zdb::Process> attach(int argc, const char **argv) {
         // Passing PID
-        if (argc == 3 && std::string_view(argv[1]) == "-p") {
-            pid = std::atoi(argv[2]);
-            if (pid <= 0) {
-                std::cerr << "Invalid PID: " << argv[2] << std::endl;
-                return -1;
-            }
-            if (ptrace(PTRACE_ATTACH, pid, nullptr, nullptr) < 0) {
-                std::perror("Failed to attach to process");
-                return -1;
-            }
+        if (argc == 3 && argv[1] == std::string_view("-p")) {
+            pid_t pid = std::atoi(argv[2]);
+            return zdb::Process::attach(pid);
         }
         // Passing program name
         else {
-            const char *program_name = argv[1];
-            pid                      = fork();
-            if (pid < 0) {
-                std::perror("Failed to fork");
-                return -1;
-            } else if (pid == 0) {
-                // Now in child process, execute the debuggee
-                if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0) {
-                    std::perror("Failed to set tracing to child process");
-                    return -1;
-                }
-                if (execlp(program_name, program_name, nullptr) < 0) {
-                    std::perror("Failed to execute program");
-                    return -1;
-                }
-            }
+            const char *program_path = argv[1];
+            return zdb::Process::launch(program_path);
         }
-        return pid;
     }
 
     std::vector<std::string> split(std::string_view str, char delimiter) {
@@ -63,32 +34,54 @@ namespace {
         return std::equal(str.begin(), str.end(), of.begin());
     }
 
-    void resume(pid_t pid) {
-        if (ptrace(PTRACE_CONT, pid, nullptr, nullptr) < 0) {
-            std::perror("Failed to continue execution\n");
-            std::exit(-1);
+    void print_stop_reason(const zdb::Process &process, zdb::StopReason &stop_reason) {
+        std::cout << "Process " << process.pid() << ' ';
+
+        switch (stop_reason.reason) {
+        case zdb::ProcessState::Stopped:
+            std::cout << "stoped with status" << stop_reason.info;
+            break;
+        case zdb::ProcessState::Exited:
+            std::cout << "exited with status" << sigabbrev_np(stop_reason.info);
+            break;
+        case zdb::ProcessState::Terminated:
+            std::cout << "terminated with status" << sigabbrev_np(stop_reason.info);
+            break;
         }
+        std::cout << std::endl;
     }
 
-    void wait_on_signal(pid_t pid) {
-        int wait_status;
-        if (waitpid(pid, &wait_status, 0) < 0) {
-            std::perror("Failed to wait for child process");
-            std::exit(-1);
-        }
-    }
-
-    void handle_command(pid_t pid, std::string_view line) {
+    void handle_command(std::unique_ptr<zdb::Process> &process, std::string_view line) {
         auto args    = split(line, ' ');
         auto command = args[0];
         if (is_prefix(command, "continue")) {
-            resume(pid);
-            wait_on_signal(pid);
+            process->resume();
+            zdb::StopReason stop_reason = process->wait_on_signal();
+            print_stop_reason(*process, stop_reason);
         } else {
-            std::cerr << "Unknown command: " << command << std::endl;
+            std::cerr << "Unknown command\n";
         }
     }
 
+    void main_loop(std::unique_ptr<zdb::Process> &proc) {
+        char *line = nullptr;
+        while ((line = readline("zdb> ")) != nullptr) {
+            std::string line_string;
+            if (line == std::string_view("")) {
+                if (history_length > 0) {
+                    line_string = history_get(history_length - 1)->line;
+                }
+            } else {
+                line_string = line;
+                add_history(line);
+            }
+            free(line);
+
+            if (!line_string.empty()) {
+                handle_command(proc, line_string);
+            }
+        }
+    }
 } // namespace
 
 int main(int argc, char **argv) {
@@ -97,33 +90,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    pid_t pid = attach(argc, argv);
-    if (pid == -1) {
-        std::cerr << "Failed to attach\n" << std::endl;
-        return 1;
-    }
+    std::unique_ptr<zdb::Process> proc = attach(argc, argv);
 
-    int wait_status;
-    // In parent process
-    if (waitpid(pid, &wait_status, 0) < 0) {
-        std::perror("Failed to wait for child process");
-    }
-
-    char *line = nullptr;
-    while ((line = readline("zdb> ")) != nullptr) {
-        std::string line_string;
-        if (line == std::string_view("")) {
-            if (history_length > 0) {
-                line_string = history_get(history_length - 1)->line;
-            }
-        } else {
-            line_string = line;
-            add_history(line);
-        }
-        free(line);
-
-        if (!line_string.empty()) {
-            handle_command(pid, line_string);
-        }
-    }
+    proc->wait_on_signal();
 }
