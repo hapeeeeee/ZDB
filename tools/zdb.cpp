@@ -2,6 +2,7 @@
 #include <libzdb/process.hpp>
 #include <string.h>
 #include <vector>
+#include <libzdb/error.hpp>
 
 namespace {
     std::unique_ptr<zdb::Process> attach(int argc, const char **argv) {
@@ -78,7 +79,11 @@ namespace {
             free(line);
 
             if (!line_string.empty()) {
-                handle_command(proc, line_string);
+                try {
+                    handle_command(proc, line_string);
+                } catch (zdb::Error &e) {
+                    std::cerr << "Error: " << e.what() << std::endl;
+                }
             }
         }
     }
@@ -91,6 +96,5 @@ int main(int argc, char **argv) {
     }
 
     std::unique_ptr<zdb::Process> proc = attach(argc, argv);
-
-    proc->wait_on_signal();
+    main_loop(proc);
 }
