@@ -1,5 +1,14 @@
 #include "libzdb/process.hpp"
 #include "libzdb/error.hpp"
+#include "libzdb/pipe.hpp"
+
+namespace {
+    void exit_with_perror(zdb::Pipe &pipe, const std::string &prefix) {
+        std::string msg = prefix + ": " + std::strerror(errno);
+        pipe.write(reinterpret_cast<std::byte *>(msg.data()), msg.size());
+        exit(-1);
+    }
+} // namespace
 
 zdb::StopReason::StopReason(int wait_status) {
     if (WIFSTOPPED(wait_status)) {
@@ -39,26 +48,38 @@ std::unique_ptr<zdb::Process> zdb::Process::attach(pid_t pid) {
         Error::send_errno("Attach failed");
     }
 
-    auto proc = std::make_unique<Process>(pid, false);
+    std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/false));
     proc->wait_on_signal();
     return proc;
 }
 
 std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path) {
+    zdb::Pipe channel(/*close_on_exec=*/true);
     pid_t pid = fork();
     if (pid < 0) {
         Error::send_errno("Fork failed");
     } else if (pid == 0) {
         // Now in child process, execute the debuggee
+        channel.close_read();
         if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0) {
-            Error::send_errno("Trace failed");
+            exit_with_perror(channel, "Trace failed");
         }
         if (execlp(path.c_str(), path.c_str(), nullptr) < 0) {
-            Error::send_errno("Exec failed");
+            exit_with_perror(channel, "Exec failed");
         }
     }
 
-    auto proc = std::make_unique<Process>(pid, true);
+    channel.close_write();
+    std::vector<std::byte> msg = channel.read();
+    channel.close_read();
+
+    if (msg.size() > 0) {
+        waitpid(pid, nullptr, 0);
+        auto chars = reinterpret_cast<char *>(msg.data());
+        zdb::Error::send(std::string(chars, chars + msg.size()));
+    }
+
+    std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/true));
     proc->wait_on_signal();
     return proc;
 }

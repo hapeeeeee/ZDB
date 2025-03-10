@@ -1,8 +1,8 @@
 #include <editline/readline.h>
+#include <libzdb/error.hpp>
 #include <libzdb/process.hpp>
 #include <string.h>
 #include <vector>
-#include <libzdb/error.hpp>
 
 namespace {
     std::unique_ptr<zdb::Process> attach(int argc, const char **argv) {
@@ -89,12 +89,16 @@ namespace {
     }
 } // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, const char **argv) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " No arguments provided\n" << std::endl;
         return 1;
     }
 
-    std::unique_ptr<zdb::Process> proc = attach(argc, argv);
-    main_loop(proc);
+    try {
+        auto process = attach(argc, argv);
+        main_loop(process);
+    } catch (const zdb::Error &err) {
+        std::cout << err.what() << '\n';
+    }
 }

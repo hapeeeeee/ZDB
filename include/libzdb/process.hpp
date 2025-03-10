@@ -25,8 +25,8 @@ namespace zdb {
 
     class Process {
       public:
-        Process()                           = delete;
-        Process(const Process &)            = delete;
+        Process()                = delete;
+        Process(const Process &) = delete;
         Process &operator=(const Process &) = delete;
         ~Process();
 

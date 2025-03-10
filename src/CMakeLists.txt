@@ -1,4 +1,4 @@
-add_library(libzdb process.cpp)
+add_library(libzdb process.cpp pipe.cpp)
 add_library(zdb::libzdb ALIAS libzdb)
 
 set_target_properties(
