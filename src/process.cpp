@@ -1,6 +1,7 @@
 #include "libzdb/process.hpp"
 #include "libzdb/error.hpp"
 #include "libzdb/pipe.hpp"
+#include "libzdb/register_info.hpp"
 
 namespace {
     void exit_with_perror(zdb::Pipe &pipe, const std::string &prefix) {
