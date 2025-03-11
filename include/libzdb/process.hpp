@@ -32,7 +32,7 @@ namespace zdb {
 
       public:
         static std::unique_ptr<Process> attach(pid_t pid);
-        static std::unique_ptr<Process> launch(std::filesystem::path path);
+        static std::unique_ptr<Process> launch(std::filesystem::path path, bool debug = true);
 
         void resume();
         StopReason wait_on_signal();
@@ -48,10 +48,12 @@ namespace zdb {
       private:
         pid_t pid_             = 0;
         bool terminate_on_end_ = true;
+        bool is_attached_      = true;
         ProcessState state_    = ProcessState::Stopped;
 
       private:
-        Process(pid_t pid, bool terminate_on_end) : pid_(pid), terminate_on_end_(terminate_on_end) {
+        Process(pid_t pid, bool terminate_on_end, bool is_attached)
+            : pid_(pid), terminate_on_end_(terminate_on_end), is_attached_(is_attached) {
         }
     };
 } // namespace zdb

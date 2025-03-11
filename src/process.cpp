@@ -24,19 +24,22 @@ zdb::StopReason::StopReason(int wait_status) {
 }
 
 zdb::Process::~Process() {
-    if (pid_ != 0) {
-        int status;
+    if (pid_ == 0) {
+        return;
+    }
+    int status;
+    if (is_attached_) {
         if (state_ == ProcessState::Running) {
             kill(pid_, SIGSTOP);
             waitpid(pid_, &status, 0);
         }
         ptrace(PTRACE_DETACH, pid_, nullptr, nullptr);
         kill(pid_, SIGCONT);
+    }
 
-        if (terminate_on_end_) {
-            kill(pid_, SIGKILL);
-            waitpid(pid_, &status, 0);
-        }
+    if (terminate_on_end_) {
+        kill(pid_, SIGKILL);
+        waitpid(pid_, &status, 0);
     }
 }
 
@@ -48,12 +51,12 @@ std::unique_ptr<zdb::Process> zdb::Process::attach(pid_t pid) {
         Error::send_errno("Attach failed");
     }
 
-    std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/false));
+    std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/false, /*is_attached=*/true));
     proc->wait_on_signal();
     return proc;
 }
 
-std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path) {
+std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path, bool debug) {
     zdb::Pipe channel(/*close_on_exec=*/true);
     pid_t pid = fork();
     if (pid < 0) {
@@ -61,7 +64,7 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path) {
     } else if (pid == 0) {
         // Now in child process, execute the debuggee
         channel.close_read();
-        if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0) {
+        if (debug && ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0) {
             exit_with_perror(channel, "Trace failed");
         }
         if (execlp(path.c_str(), path.c_str(), nullptr) < 0) {
@@ -69,6 +72,13 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path) {
         }
     }
 
+    // Since Pipe's `close_on_exec` is set to true, if `execlp` succeeds,
+    // the child process will close the write end of the pipe.
+    // As a result, the read operation in the parent process will unblock
+    // because the other end of the pipe is completely closed.
+    // If `execlp` fails, the child process remains alive, and the pipe
+    // stays open, allowing the child process to write data to the pipe
+    // for the parent process to read.
     channel.close_write();
     std::vector<std::byte> msg = channel.read();
     channel.close_read();
@@ -79,8 +89,14 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path) {
         zdb::Error::send(std::string(chars, chars + msg.size()));
     }
 
-    std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/true));
-    proc->wait_on_signal();
+    std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/true, /*is_attached=*/debug));
+    if (debug) {
+        // Since the child process set ptrace with `PTRACE_TRACEME` before calling `execlp`,
+        // this causes the newly executed process to stop immediately after `execlp`.
+        // This state change triggers a signal in the child process,
+        // allowing `waitpid` to return without blocking.
+        proc->wait_on_signal();
+    }
     return proc;
 }
 

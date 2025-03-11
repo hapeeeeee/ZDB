@@ -43,7 +43,6 @@ std::vector<std::byte> zdb::Pipe::read() {
     if (bytes_read < 0) {
         zdb::Error::send_errno("Pipe read failed");
     }
-    printf("Pipe read: %s\n", buffer);
     auto bytes = reinterpret_cast<std::byte *>(buffer);
     return std::vector<std::byte>(bytes, bytes + bytes_read);
 }
