@@ -7,6 +7,7 @@
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <libzdb/registers.hpp>
 
 namespace zdb {
     enum class ProcessState {
@@ -33,28 +34,28 @@ namespace zdb {
       public:
         static std::unique_ptr<Process> attach(pid_t pid);
         static std::unique_ptr<Process> launch(std::filesystem::path path, bool debug = true);
-
         void resume();
         StopReason wait_on_signal();
+        void write_user_area(std::size_t offset, std::uint64_t data);
 
-        pid_t pid() const {
-            return pid_;
-        }
-
-        ProcessState state() const {
-            return state_;
-        }
+        Registers& get_registers() { return *registers_; }
+        const Registers& get_registers() const { return *registers_; }
+        pid_t pid() const { return pid_;}
+        ProcessState state() const { return state_;}
 
       private:
         pid_t pid_             = 0;
         bool terminate_on_end_ = true;
         bool is_attached_      = true;
         ProcessState state_    = ProcessState::Stopped;
+        std::unique_ptr<Registers> registers_;
 
       private:
         Process(pid_t pid, bool terminate_on_end, bool is_attached)
-            : pid_(pid), terminate_on_end_(terminate_on_end), is_attached_(is_attached) {
-        }
+            : pid_(pid), terminate_on_end_(terminate_on_end), is_attached_(is_attached),
+              registers_(new Registers(*this)) {}
+        
+        void read_all_registers();
     };
 } // namespace zdb
 

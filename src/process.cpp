@@ -1,7 +1,6 @@
-#include "libzdb/process.hpp"
-#include "libzdb/error.hpp"
-#include "libzdb/pipe.hpp"
-#include "libzdb/register_info.hpp"
+#include <libzdb/error.hpp>
+#include <libzdb/pipe.hpp>
+#include <libzdb/process.hpp>
 
 namespace {
     void exit_with_perror(zdb::Pipe &pipe, const std::string &prefix) {
@@ -116,4 +115,24 @@ zdb::StopReason zdb::Process::wait_on_signal() {
     StopReason stop_reason(wait_status);
     state_ = stop_reason.reason;
     return stop_reason;
+}
+
+void zdb::Process::read_all_registers() {
+    if (ptrace(PTRACE_GETREGS, pid_, nullptr, &get_registers().data_.regs) < 0) {
+        Error::send_errno("Read registers failed");
+    }
+    if (ptrace(PTRACE_GETFPREGS, pid_, nullptr, &get_registers().data_.i387) < 0) {
+        Error::send_errno("Read FPU registers failed");
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        
+    }
+}
+
+
+void zdb::Process::write_user_area(std::size_t offset, std::uint64_t data) {
+    if (ptrace(PTRACE_POKEUSER, pid_, offset, data) < 0) {
+        Error::send_errno("Write user area failed");
+    }
 }
