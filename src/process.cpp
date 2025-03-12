@@ -114,6 +114,11 @@ zdb::StopReason zdb::Process::wait_on_signal() {
     }
     StopReason stop_reason(wait_status);
     state_ = stop_reason.reason;
+
+    if (is_attached_ && state_ == ProcessState::Stopped) {
+        read_all_registers();
+    }
+
     return stop_reason;
 }
 
@@ -126,7 +131,14 @@ void zdb::Process::read_all_registers() {
     }
 
     for (int i = 0; i < 8; ++i) {
-        
+        auto id = static_cast<int>(RegisterId::dr0) + i;
+        auto info = find_register_info_by_id(static_cast<RegisterId>(id));
+        errno = 0;
+        std::int64_t data = ptrace(PTRACE_PEEKUSER, pid_, info.offset, nullptr); 
+        if (errno != 0) {
+            zdb::Error::send_errno("Could not read debug register");
+        }
+        get_registers().data_.u_debugreg[i] = data;
     }
 }
 
@@ -134,5 +146,17 @@ void zdb::Process::read_all_registers() {
 void zdb::Process::write_user_area(std::size_t offset, std::uint64_t data) {
     if (ptrace(PTRACE_POKEUSER, pid_, offset, data) < 0) {
         Error::send_errno("Write user area failed");
+    }
+}
+
+void zdb::Process::write_fprs(const user_fpregs_struct& fprs) {
+    if (ptrace(PTRACE_SETFPREGS, pid_, nullptr, &fprs) < 0) {
+        Error::send_errno("Could not write floating point registers");
+    }
+}
+
+void zdb::Process::write_gprs(const user_regs_struct& gprs) {
+    if (ptrace(PTRACE_SETREGS, pid_, nullptr, &gprs) < 0) {
+        Error::send_errno("Could not write general purpose registers");
     }
 }

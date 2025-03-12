@@ -31,7 +31,7 @@ namespace zdb {
     }
 
     template<typename From>
-    byte128 as_byte128( From& from) {
+    byte128 as_byte128(From& from) {
         byte128 obj{};
         std::memcpy(&obj, &from, sizeof(From));
         return obj;

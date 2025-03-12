@@ -2,6 +2,32 @@
 #include <libzdb/process.hpp>
 #include <libzdb/registers.hpp>
 
+    #include <type_traits>
+#include <algorithm>
+namespace {
+    template <class T>
+    zdb::byte128 widen(const zdb::RegisterInfo& info, T t) {
+        using namespace sdb;
+        if constexpr (std::is_floating_point_v<T>) {
+            if (info.format == RegisterFormat::double_float)
+                return as_byte128(static_cast<double>(t));
+            if (info.format == RegisterFormat::long_double)
+                return as_byte128(static_cast<long double>(t));
+        }
+        else if constexpr (std::is_signed_v<T>) {
+            if (info.format == RegisterFormat::uint) {
+                switch (info.size) {
+                    case 2: return as_byte128(static_cast<std::int16_t>(t));
+                    case 4: return as_byte128(static_cast<std::int32_t>(t));
+                    case 8: return as_byte128(static_cast<std::int64_t>(t));
+                }
+            }
+        }
+        return to_byte128(t);
+    }
+}
+
+
 zdb::Registers::Value zdb::Registers::read(const RegisterInfo &info) const {
     auto bytes = as_bytes(data_);
     if (info.format == RegisterFormat::uint) {
@@ -34,9 +60,10 @@ void zdb::Registers::write(const RegisterInfo &info, Value val) {
     auto bytes = as_bytes(data_);
     std::visit(
         [&](auto &v) {
-            if (sizeof(v) == info.size) {
-                auto val_bytes = as_bytes(v);
-                std::copy(val_bytes, val_bytes + sizeof(v), bytes + info.offset);
+            if (sizeof(v) <= info.size) {
+                auto widen_v = widen(info, v);
+                auto val_bytes = as_bytes(widen_v);
+                std::copy(val_bytes, val_bytes + info.size, bytes + info.offset);
             } else {
                 zdb::Error::send("Invalid value size");
             }
@@ -44,9 +71,15 @@ void zdb::Registers::write(const RegisterInfo &info, Value val) {
         val
     );
 
-    proc_->write_user_area(
-        info.offset,
-        from_bytes_as<std::uint64_t>(bytes + info.offset)
-    );
+    if (info.type == RegisterType::fpr) {
+        proc_->write_fprs(data_.i387);
+    } else {
+        auto aligned_offset = info.offset & ~0b111;
+        proc_->write_user_area(
+            aligned_offset,
+            from_bytes_as<std::uint64_t>(bytes + aligned_offset)
+        );
+    }
 }
+    
 

@@ -37,6 +37,8 @@ namespace zdb {
         void resume();
         StopReason wait_on_signal();
         void write_user_area(std::size_t offset, std::uint64_t data);
+        void write_fprs(const user_fpregs_struct& fprs);
+        void write_gprs(const user_regs_struct& gprs);
 
         Registers& get_registers() { return *registers_; }
         const Registers& get_registers() const { return *registers_; }
