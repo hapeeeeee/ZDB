@@ -2,12 +2,12 @@
 #include <libzdb/process.hpp>
 #include <libzdb/registers.hpp>
 
-    #include <type_traits>
+#include <type_traits>
 #include <algorithm>
 namespace {
     template <class T>
     zdb::byte128 widen(const zdb::RegisterInfo& info, T t) {
-        using namespace sdb;
+        using namespace zdb;
         if constexpr (std::is_floating_point_v<T>) {
             if (info.format == RegisterFormat::double_float)
                 return as_byte128(static_cast<double>(t));
@@ -23,7 +23,7 @@ namespace {
                 }
             }
         }
-        return to_byte128(t);
+        return as_byte128(t);
     }
 }
 

@@ -56,7 +56,11 @@ std::unique_ptr<zdb::Process> zdb::Process::attach(pid_t pid) {
     return proc;
 }
 
-std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path, bool debug) {
+std::unique_ptr<zdb::Process> zdb::Process::launch(
+    std::filesystem::path path, 
+    bool debug, 
+    std::optional<int> stdout_fd
+) {
     zdb::Pipe channel(/*close_on_exec=*/true);
     pid_t pid = fork();
     if (pid < 0) {
@@ -64,6 +68,11 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(std::filesystem::path path, b
     } else if (pid == 0) {
         // Now in child process, execute the debuggee
         channel.close_read();
+        if (stdout_fd) {
+            if (dup2(*stdout_fd, STDOUT_FILENO) < 0) {
+                exit_with_perror(channel, "Dup2 failed");
+            }
+        }
         if (debug && ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0) {
             exit_with_perror(channel, "Trace failed");
         }

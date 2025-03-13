@@ -2,6 +2,11 @@
 #include <fstream>
 #include <libzdb/error.hpp>
 #include <libzdb/process.hpp>
+#include <libzdb/pipe.hpp>
+#include <string_view>
+#include <libzdb/bit.hpp>
+#include <libzdb/pipe.hpp>
+
 using namespace zdb;
 
 namespace {
@@ -64,4 +69,20 @@ TEST_CASE("Process::resume already terminated", "[process]") {
     proc->resume();
     proc->wait_on_signal();
     REQUIRE_THROWS_AS(proc->resume(), zdb::Error);
+}
+
+TEST_CASE("Write register works", "[register]") {
+    zdb::Pipe pipe(/*close_on_exec=*/true);
+    auto proc = Process::launch("bin/reg_write", true, pipe.get_write());
+    
+    proc->resume();
+    proc->wait_on_signal();
+
+    zdb::Registers& regs = proc->get_registers();
+    regs.write_by_id(RegisterId::rsi, 0xcafecafe);
+    proc->resume();
+    proc->wait_on_signal();
+
+    auto result = pipe.read();
+    REQUIRE(to_string_view(result) == "0xcafecafe");
 }

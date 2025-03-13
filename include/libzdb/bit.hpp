@@ -4,7 +4,8 @@
 #include <cstring>
 #include <libzdb/types.hpp>
 #include <cstdint>
-
+#include <vector>
+#include <string_view>
 namespace zdb {
     template<typename To>
     To from_bytes_as(const std::byte* bytes) {
@@ -24,19 +25,25 @@ namespace zdb {
     }
 
     template<typename From>
-    byte64 as_byte64(From& from) {
+    byte64 as_byte64(const From& from) {
         byte64 obj{};
         std::memcpy(&obj, &from, sizeof(From));
         return obj;
     }
 
     template<typename From>
-    byte128 as_byte128(From& from) {
+    byte128 as_byte128(const From& from) {
         byte128 obj{};
         std::memcpy(&obj, &from, sizeof(From));
         return obj;
     }
 
-        
+    inline std::string_view to_string_view(const std::byte* bytes, std::size_t size) {
+        return std::string_view(reinterpret_cast<const char*>(bytes), size);
+    }
+
+    inline std::string_view to_string_view(const std::vector<std::byte>& bytes) {
+        return std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
 }
 #endif // LIBZDB_BIT_HPP
