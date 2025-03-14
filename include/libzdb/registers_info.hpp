@@ -67,7 +67,7 @@ namespace zdb {
 
     inline const RegisterInfo& find_register_info_by_name(std::string_view name) {
         return find_register_info_by(
-            [name](const RegisterInfo& info) {return info.name == name;}
+            [name](const RegisterInfo& info){return info.name == name;}
         );
     }
 

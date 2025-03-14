@@ -1,6 +1,5 @@
 add_executable(zdb zdb.cpp)
-target_link_libraries(zdb PRIVATE zdb::libzdb)
-target_link_libraries(zdb PRIVATE zdb::libzdb PkgConfig::libedit)
+target_link_libraries(zdb PRIVATE zdb::libzdb PkgConfig::libedit fmt::fmt)
 
 include(GNUInstallDirs)
 install(
