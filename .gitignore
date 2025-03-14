@@ -17,6 +17,7 @@
 *.dll
 build
 .vscode
+.cursor
 bin
 
 # Fortran module files
