@@ -52,6 +52,22 @@ namespace {
         std::cout << std::endl;
     }
 
+    void print_help(const std::vector<std::string> &args) {
+        if (args.size() == 1) {
+            std::cerr << R"(Available commands:
+                continue - Resume the process
+                register - Commands for operating on registers)" << std::endl;
+        } else if (args[1] == "register") {
+            std::cerr << R"(Available commands:
+            read
+            read <register>
+            read all
+            write <register> <value>)" << std::endl;
+        } else {
+            std::cerr << "No help available on that\n";
+        }
+    }
+
     void handle_command(std::unique_ptr<zdb::Process> &process, std::string_view line) {
         auto args    = split(line, ' ');
         auto command = args[0];
@@ -59,7 +75,11 @@ namespace {
             process->resume();
             zdb::StopReason stop_reason = process->wait_on_signal();
             print_stop_reason(*process, stop_reason);
-        } else {
+        } else if (is_prefix(command, "help")) {
+            print_help(args);
+        } else if (is_prefix(command, "register")) {
+        }
+        else {
             std::cerr << "Unknown command\n";
         }
     }
@@ -70,7 +90,7 @@ namespace {
             std::string line_string;
             if (line == std::string_view("")) {
                 if (history_length > 0) {
-                    line_string = history_get(history_length - 1)->line;
+                    line_string = history_list()[history_length - 1]->line;
                 }
             } else {
                 line_string = line;
