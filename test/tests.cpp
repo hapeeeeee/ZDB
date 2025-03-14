@@ -74,7 +74,6 @@ TEST_CASE("Process::resume already terminated", "[process]") {
 TEST_CASE("Write register works", "[register]") {
     zdb::Pipe pipe(/*close_on_exec=*/true);
     auto proc = Process::launch("bin/reg_write", true, pipe.get_write());
-    
     proc->resume();
     proc->wait_on_signal();
 
@@ -82,7 +81,58 @@ TEST_CASE("Write register works", "[register]") {
     regs.write_by_id(RegisterId::rsi, 0xcafecafe);
     proc->resume();
     proc->wait_on_signal();
-
     auto result = pipe.read();
     REQUIRE(to_string_view(result) == "0xcafecafe");
+
+    regs.write_by_id(RegisterId::mm0, 0xba5eba11);
+    proc->resume();
+    proc->wait_on_signal();
+    result = pipe.read();
+    REQUIRE(to_string_view(result) == "0xba5eba11");
+
+    regs.write_by_id(RegisterId::xmm0, 42.24);
+    proc->resume();
+    proc->wait_on_signal();
+    result = pipe.read();
+    REQUIRE(to_string_view(result) == "42.24");
+
+    regs.write_by_id(RegisterId::st0, 42.24l);
+    regs.write_by_id(RegisterId::fsw, std::uint16_t(0b0011100000000000));
+    regs.write_by_id(RegisterId::ftw, std::uint16_t(0b0011111111111111));
+    proc->resume();
+    proc->wait_on_signal();
+    result = pipe.read();
+    REQUIRE(to_string_view(result) == "42.24");
+}
+
+
+TEST_CASE("Read register works", "[register]") {
+    auto proc = Process::launch("bin/reg_read");
+    auto &regs = proc->get_registers();
+    regs.write_by_id(RegisterId::r13, 0xcafecafe);
+    proc->resume();
+    proc->wait_on_signal();
+    auto r13 = regs.read_by_id_as<std::uint64_t>(RegisterId::r13);
+    REQUIRE(r13 == 0xcafecafe);
+
+    proc->resume();
+    proc->wait_on_signal();
+    auto r13b = regs.read_by_id_as<std::uint8_t>(RegisterId::r13b);
+    REQUIRE(r13b == 42);
+    
+    proc->resume();
+    proc->wait_on_signal();
+    auto mm0 = regs.read_by_id_as<byte64>(RegisterId::mm0);
+    REQUIRE(mm0 == as_byte64(0xba5eba11ull));
+    
+    proc->resume();
+    proc->wait_on_signal();
+    auto xmm0 = regs.read_by_id_as<byte128>(RegisterId::xmm0);
+    REQUIRE(xmm0 == as_byte128(64.125));
+
+    proc->resume();
+    proc->wait_on_signal();
+    auto st0 = regs.read_by_id_as<long double>(RegisterId::st0);
+    REQUIRE(st0 == 64.125L);
+
 }

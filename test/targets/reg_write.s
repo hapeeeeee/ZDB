@@ -2,6 +2,8 @@
 
 .section .data
 hex_format: .asciz "%#x"
+float_format: .asciz "%.2f"
+long_float_format: .asciz "%.2Lf"
 
 .section .text
 
@@ -17,19 +19,55 @@ main:
     push %rbp
     movq %rsp, %rbp
 
-    # syscall for get curr pid
+    # Syscall for get curr pid
     movq $39, %rax
     syscall
     movq %rax, %r12
-
     trap
 
-    # print content in rsi
+    # Print content in rsi
     leaq hex_format(%rip), %rdi
     movq $0, %rax
     call printf@plt
     movq $0, %rdi
     call fflush@plt
+    trap
+
+    # Print content in mm0
+    movq %mm0, %rsi
+    leaq hex_format(%rip), %rdi
+    movq $0, %rax
+    call printf@plt
+    movq $0, %rdi
+    call fflush@plt
+    trap
+
+    # Print content in xmm0
+    leaq float_format(%rip), %rdi
+    movq $1, %rax
+    call printf@plt
+    movq $0, %rdi
+    call fflush@plt
+    trap
+
+    # Print content in st0
+    subq $16, %rsp
+    fstpt (%rsp)
+    leaq long_float_format(%rip), %rdi
+    movq $0, %rax
+    call printf@plt
+    movq $0, %rdi
+    call fflush@plt
+    addq $16, %rsp
+    # subq $16, %rsp
+    # fstpl (%rsp)
+    # leaq long_double_format(%rip), %rdi
+    # movq $0, %rax
+    # call printf@plt
+    # movq $0, %rdi
+    # call fflush@plt
+    # addq $16, %rsp
+    trap
 
     popq %rbp
     movq $0, %rax
