@@ -73,20 +73,23 @@ namespace {
 
 
     void print_stop_reason(const zdb::Process &process, zdb::StopReason &stop_reason) {
-        std::cout << "Process " << process.pid() << ' ';
-
+        std::string message;
         switch (stop_reason.reason) {
-        case zdb::ProcessState::Stopped:
-            std::cout << "stoped with status" << stop_reason.info;
+        case zdb::ProcessState::Terminated:
+            message = fmt::format("terminated with status {}", static_cast<int>(stop_reason.info));
             break;
         case zdb::ProcessState::Exited:
-            std::cout << "exited with status" << sigabbrev_np(stop_reason.info);
+            message = fmt::format("exited with status {}", sigabbrev_np(stop_reason.info));
             break;
-        case zdb::ProcessState::Terminated:
-            std::cout << "terminated with status" << sigabbrev_np(stop_reason.info);
+        case zdb::ProcessState::Stopped:
+            message = fmt::format(
+                "stopped with signal {} at {:#x}", 
+                sigabbrev_np(stop_reason.info), 
+                process.get_pc().addr()
+            );
             break;
         }
-        std::cout << std::endl;
+        fmt::print("Process {} {}\n", process.pid(), message);
     }
 
     void print_help(const std::vector<std::string> &args) {

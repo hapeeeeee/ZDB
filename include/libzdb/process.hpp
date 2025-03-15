@@ -47,6 +47,9 @@ namespace zdb {
 
         Registers& get_registers() { return *registers_; }
         const Registers& get_registers() const { return *registers_; }
+        VirtualAddr get_pc() const { 
+          return VirtualAddr(get_registers().read_by_id_as<std::uint64_t>(RegisterId::rip)); 
+        }
 
       //   registers& get_registers() { return *registers_; }
       // const registers& get_registers() const { return *registers_; }
