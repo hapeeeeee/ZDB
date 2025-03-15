@@ -57,10 +57,10 @@ namespace {
             }
             else if (info.format == zdb::RegisterFormat::vector) {
                 if (info.size == 8) {
-                    return zdb::parse_vector<8>(text);
+                    return zdb::parse_vector<8>(text).value();
                 }
                 else if (info.size == 16) {
-                    return zdb::parse_vector<16>(text);
+                    return zdb::parse_vector<16>(text).value();
                 }
             }
         }
@@ -157,7 +157,7 @@ namespace {
         }
     }
 
-    void handle_register_command(const zdb::Process &process, const std::vector<std::string> &args) {
+    void handle_register_command(zdb::Process &process, const std::vector<std::string> &args) {
         if (args.size() < 2) {
             print_help({"help", "register"});
             return;
