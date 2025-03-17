@@ -19,6 +19,7 @@ class Process;
         BreakpointSite& operator=(BreakpointSite&&) = delete;
 
         id_type id() const { return id_; }
+        VirtualAddr address() const { return address_; }
 
         void enable();
         void disable();

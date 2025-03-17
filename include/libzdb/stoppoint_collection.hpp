@@ -116,9 +116,6 @@ namespace zdb {
     void StoppointCollection<Stoppoint>::for_each(Func func) const {
         std::for_each(begin(stoppoints_), end(stoppoints_), func);
     }
-    
-    
-        
 
     template <class Stoppoint>
     auto StoppointCollection<Stoppoint>::find_by_id(typename Stoppoint::id_type id) -> typename points_t::iterator { 
