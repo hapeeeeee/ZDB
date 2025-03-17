@@ -9,7 +9,8 @@
 #include <sys/wait.h>
 #include <libzdb/registers.hpp>
 #include <optional>
-
+#include <libzdb/breakpoint_site.hpp>
+#include <libzdb/stoppoint_collection.hpp>
 namespace zdb {
     enum class ProcessState {
         Running,
@@ -41,6 +42,7 @@ namespace zdb {
         );
         void resume();
         StopReason wait_on_signal();
+
         void write_user_area(std::size_t offset, std::uint64_t data);
         void write_fprs(const user_fpregs_struct& fprs);
         void write_gprs(const user_regs_struct& gprs);
@@ -51,11 +53,16 @@ namespace zdb {
           return VirtualAddr(get_registers().read_by_id_as<std::uint64_t>(RegisterId::rip)); 
         }
 
-      //   registers& get_registers() { return *registers_; }
-      // const registers& get_registers() const { return *registers_; }
-
         pid_t pid() const { return pid_;}
         ProcessState state() const { return state_;}
+
+        BreakpointSite& create_breakpoint_site(VirtualAddr address);
+
+        StoppointCollection<BreakpointSite>& 
+        breakpoint_sites() { return breakpoint_sites_; }
+
+        const StoppointCollection<BreakpointSite>& 
+        breakpoint_sites() const { return breakpoint_sites_; }
 
       private:
         pid_t pid_             = 0;
@@ -63,6 +70,7 @@ namespace zdb {
         bool is_attached_      = true;
         ProcessState state_    = ProcessState::Stopped;
         std::unique_ptr<Registers> registers_;
+        StoppointCollection<BreakpointSite> breakpoint_sites_;
 
       private:
         Process(pid_t pid, bool terminate_on_end, bool is_attached)
@@ -70,6 +78,7 @@ namespace zdb {
               registers_(new Registers(*this)) {}
         
         void read_all_registers();
+        
     };
 } // namespace zdb
 

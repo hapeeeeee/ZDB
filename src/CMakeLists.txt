@@ -1,4 +1,4 @@
-add_library(libzdb process.cpp pipe.cpp registers.cpp)
+add_library(libzdb process.cpp pipe.cpp registers.cpp breakpoint_site.cpp)
 add_library(zdb::libzdb ALIAS libzdb)
 
 set_target_properties(

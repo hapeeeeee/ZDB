@@ -169,3 +169,15 @@ void zdb::Process::write_gprs(const user_regs_struct& gprs) {
         Error::send_errno("Could not write general purpose registers");
     }
 }
+
+zdb::BreakpointSite& zdb::Process::create_breakpoint_site(VirtualAddr address) {
+    if (breakpoint_sites_.contains_address(address)) {
+        Error::send(
+            "Breakpoint site already exists as address " + std::to_string(address.addr())
+        );
+    }
+    auto site = std::unique_ptr<BreakpointSite>(
+        new BreakpointSite(*this, address)
+    );
+    return breakpoint_sites_.push(std::move(site));
+}
