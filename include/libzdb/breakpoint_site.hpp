@@ -23,7 +23,7 @@ class Process;
 
         void enable();
         void disable();
-        bool is_enabled() const;
+        bool is_enabled() const { return is_enabled_; }
         bool at_address(VirtualAddr address) const {
             return address_ == address;
         }

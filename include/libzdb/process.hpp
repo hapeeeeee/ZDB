@@ -52,6 +52,9 @@ namespace zdb {
         VirtualAddr get_pc() const { 
           return VirtualAddr(get_registers().read_by_id_as<std::uint64_t>(RegisterId::rip)); 
         }
+        void set_pc(VirtualAddr addr) {
+          get_registers().write_by_id(RegisterId::rip, addr.addr());
+        }
 
         pid_t pid() const { return pid_;}
         ProcessState state() const { return state_;}

@@ -1,7 +1,7 @@
 #include <libzdb/error.hpp>
 #include <libzdb/pipe.hpp>
 #include <libzdb/process.hpp>
-
+#include <sys/personality.h>
 namespace {
     void exit_with_perror(zdb::Pipe &pipe, const std::string &prefix) {
         std::string msg = prefix + ": " + std::strerror(errno);
@@ -67,6 +67,7 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(
         Error::send_errno("Fork failed");
     } else if (pid == 0) {
         // Now in child process, execute the debuggee
+        personality(ADDR_NO_RANDOMIZE);
         channel.close_read();
         if (stdout_fd) {
             if (dup2(*stdout_fd, STDOUT_FILENO) < 0) {
@@ -110,6 +111,21 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(
 }
 
 void zdb::Process::resume() {
+    auto pc = get_pc();
+    if (breakpoint_sites_.enabled_stoppoint_at_address(pc)) {
+        auto &bp = breakpoint_sites_.get_by_address(pc);
+        bp.disable();
+        if (ptrace(PTRACE_SINGLESTEP, pid_, nullptr, nullptr) < 0) {
+            Error::send_errno("Single Step after breakpoint failed");
+        }
+
+        int status;
+        if (waitpid(pid_, &status, 0) < 0) {
+            Error::send_errno("Wait after single step failed");
+        }
+        bp.enable();
+    } 
+    
     if (ptrace(PTRACE_CONT, pid_, nullptr, nullptr) < 0) {
         Error::send_errno("Continue failed");
     }
@@ -126,6 +142,12 @@ zdb::StopReason zdb::Process::wait_on_signal() {
 
     if (is_attached_ && state_ == ProcessState::Stopped) {
         read_all_registers();
+
+        auto instr_begin = get_pc() - 1;
+        if (stop_reason.info == SIGTRAP and
+            breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)) {
+            set_pc(instr_begin);
+        }
     }
 
     return stop_reason;

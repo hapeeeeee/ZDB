@@ -17,7 +17,9 @@ namespace {
         // Passing program name
         else {
             const char *program_path = argv[1];
-            return zdb::Process::launch(program_path);
+            auto proc = zdb::Process::launch(program_path);
+            fmt::print("Process {} launched\n", proc->pid());
+            return proc;
         }
     }
 
@@ -79,7 +81,7 @@ namespace {
             message = fmt::format("terminated with status {}", static_cast<int>(stop_reason.info));
             break;
         case zdb::ProcessState::Exited:
-            message = fmt::format("exited with status {}", sigabbrev_np(stop_reason.info));
+            message = fmt::format("exited with status {}", static_cast<int>(stop_reason.info));
             break;
         case zdb::ProcessState::Stopped:
             message = fmt::format(
@@ -95,6 +97,7 @@ namespace {
     void print_help(const std::vector<std::string> &args) {
         if (args.size() == 1) {
             std::cerr << R"(Available commands:
+                breakpoint - Commands for operating on breakpoints
                 continue - Resume the process
                 register - Commands for operating on registers)" << std::endl;
         } else if (args[1] == "register") {
@@ -103,6 +106,13 @@ namespace {
             read <register>
             read all
             write <register> <value>)" << std::endl;
+        } else if (args[1] == "breakpoint") {
+            std::cerr << R"(Available commands:
+            list
+            set <address>
+            enable <id>
+            disable <id>
+            delete <id>)" << std::endl;
         } else {
             std::cerr << "No help available on that\n";
         }
@@ -175,6 +185,79 @@ namespace {
         }
     }
 
+    void handle_breakpoint_list_command(zdb::Process &process) {
+        if (process.breakpoint_sites().empty()) {
+            fmt::print("No breakpoints set\n");
+            return;
+        }
+
+        fmt::print("Current Breakpoints:\n");
+        process.breakpoint_sites().for_each(
+            [&](auto &site) {
+                fmt::print("{}: address = {:#x}, enabled = {}\n", 
+                    site->id(), 
+                    site->address().addr(), 
+                    site->is_enabled() ? "enabled" : "disabled"
+                );
+            }
+        );
+    }
+
+    void handle_breakpoint_set_command(zdb::Process &process, const std::string &sub_cmd_arg) {
+        auto address = zdb::to_integral<std::uint64_t>(sub_cmd_arg, 16);
+
+        if (!address) {
+            fmt::print(
+                stderr,
+                "Breakpoint command expects address in hexadecimal, prefixed with '0x'\n"
+            );
+            return;
+        }
+
+        process.create_breakpoint_site(zdb::VirtualAddr(address.value())).enable();
+        fmt::print("Breakpoint set at {:#x}\n", address.value());
+    }
+
+    void handle_breakpoint_command(zdb::Process &process, const std::vector<std::string> &args) {
+        if (args.size() < 2) {
+            print_help({"help", "breakpoint"});
+            return;
+        }
+
+        auto sub_command = args[1];
+        if (is_prefix(sub_command, "list")) {
+            handle_breakpoint_list_command(process);
+            return;
+        } 
+        
+        if (args.size() < 3) {
+            print_help({"help", "breakpoint"});
+            return;
+        }
+        if (is_prefix(sub_command, "set")) {
+            handle_breakpoint_set_command(process, args[2]);
+            return;
+        } 
+
+        auto bp_id = zdb::to_integral<std::uint64_t>(args[2], 10);
+        if (!bp_id) {
+            fmt::print(
+                stderr,
+                "Breakpoint command expects breakpoint id\n"
+            );
+            return;
+        }
+
+        if (is_prefix(sub_command, "enable")) {
+            process.breakpoint_sites().get_by_id(bp_id.value()).enable();
+        } else if (is_prefix(sub_command, "disable")) {
+            process.breakpoint_sites().get_by_id(bp_id.value()).disable();
+        } else if (is_prefix(sub_command, "delete")) {
+            process.breakpoint_sites().remove_by_id(bp_id.value());
+        } 
+
+
+    }
     void handle_command(std::unique_ptr<zdb::Process> &process, std::string_view line) {
         auto args    = split(line, ' ');
         auto command = args[0];
@@ -186,8 +269,9 @@ namespace {
             print_help(args);
         } else if (is_prefix(command, "register")) {
             handle_register_command(*process, args);
-        }
-        else {
+        } else if (is_prefix(command, "breakpoint")) {
+            handle_breakpoint_command(*process, args);
+        } else {
             std::cerr << "Unknown command\n";
         }
     }

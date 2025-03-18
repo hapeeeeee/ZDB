@@ -94,14 +94,14 @@ namespace zdb {
     template <class Stoppoint>
     void StoppointCollection<Stoppoint>::remove_by_id(typename Stoppoint::id_type id) {
         auto it = find_by_id(id);
-        **it.disable();
+        (**it).disable();
         stoppoints_.erase(it);
     }
 
     template <class Stoppoint>
     void StoppointCollection<Stoppoint>::remove_by_address(VirtualAddr address) {
         auto it = find_by_address(address);
-        **it.disable();
+        (**it).disable();
         stoppoints_.erase(it);
     }
     

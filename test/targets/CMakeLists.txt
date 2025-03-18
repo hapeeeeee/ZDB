@@ -1,9 +1,19 @@
-add_executable(run_endlessly run_endlessly.cpp)
+function(add_test_cpp_executable name)
+    add_executable(${name} ${name}.cpp)
+    target_compile_options(${name} PRIVATE -g -O0 -pie)
+    add_dependencies(tests ${name})
+endfunction()
 
-add_executable(end_immediately end_immediately.cpp)
+function(add_test_asm_executable name)
+    add_executable(${name} ${name}.s)
+    target_compile_options(${name} PRIVATE -pie)
+    add_dependencies(tests ${name})
+endfunction()
 
-add_executable(reg_write reg_write.s)
-target_compile_options(reg_write PRIVATE -pie)
+add_test_cpp_executable(run_endlessly)
+add_test_cpp_executable(end_immediately)
+add_test_cpp_executable(hello_zdb)
 
-add_executable(reg_read reg_read.s)
-target_compile_options(reg_read PRIVATE -pie)
+add_test_asm_executable(reg_write)
+add_test_asm_executable(reg_read)
+
