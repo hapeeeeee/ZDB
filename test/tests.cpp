@@ -6,6 +6,9 @@
 #include <string_view>
 #include <libzdb/bit.hpp>
 #include <libzdb/pipe.hpp>
+#include <stdio.h>
+#include <regex>
+#include <elf.h>
 
 using namespace zdb;
 
@@ -25,6 +28,73 @@ namespace {
         return line[index_of_status_indicator];
     }
 } // namespace
+
+namespace {
+    /// 由于可执行程序编译时指定了`-pie`, 所以可执行程序的磁盘文件的加载地址和实际偏移不同，
+    /// 所以需要计算可执行程序的代码段被加载时的误差
+    /// 计算方式是：代码段的加载误差 = 代码段的加载地址 - 代码段在磁盘文件中的实际偏移 (get_section_load_bias)
+    /// 然后计算：  入口指令的磁盘实际偏移 = 入口指令的磁盘地址 - 代码段的加载误差 (get_entry_point_offset)
+    /// 由于我们的调试器在launch子程序时设置了`personality(ADDR_NO_RANDOMIZE)`,
+    /// 所以可执行程序的加载地址是固定的，不存在指令加载地址和内存地址不同的情况
+    /// 所以可以计算出可执行程序的入口指令的内存地址相对于程序加载内存地址的偏移 
+    /// 计算方式是：入口指令的内存地址 = 程序的起始内存地址 + 入口指令的磁盘实际偏移 (get_load_address)
+
+    std::int64_t get_section_load_bias(std::filesystem::path path, Elf64_Addr vaddr) {
+        auto command = std::string("readelf -WS ") + path.string();
+        auto fd = popen(command.c_str(), "r");
+        if (!fd) {
+            zdb::Error::send_errno("Failed to run readelf");
+        }
+
+        std::regex text_regex(R"(PROGBITS\s+(\w+)\s+(\w+)\s+(\w+))");
+        char *line = nullptr;
+        size_t len = 0;
+        while (getline(&line, &len, fd) != -1) {
+            std::cmatch match;
+            if (std::regex_match(line, match, text_regex)) {
+                auto address = std::stol(match[1], nullptr, 16);
+                auto offset = std::stol(match[2], nullptr, 16);
+                auto size = std::stol(match[3], nullptr, 16);
+                if (address <= vaddr && vaddr < address + size) {
+                    pclose(fd);
+                    free(line);
+                    return address - offset;
+                }
+            }
+            free(line);
+            line = nullptr;
+        }
+        pclose(fd);
+        zdb::Error::send("Failed to find section for address");
+    }
+
+    std::int64_t get_entry_point_offset(std::filesystem::path path) {
+        std::ifstream elf_file(path);
+        Elf64_Ehdr header;
+        elf_file.read(reinterpret_cast<char*>(&header), sizeof(header));
+        auto entry_file_address = header.e_entry;
+        return entry_file_address - get_section_load_bias(path, entry_file_address);
+    }
+
+    VirtualAddr get_load_address(pid_t pid, std::int64_t offset) {
+        std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
+        std::regex map_regex (R"((\w+)-\w+ ..(.). (\w+))");
+        std::string data;
+        while (std::getline(maps, data)) {
+            std::smatch groups;
+            std::regex_search(data, groups, map_regex);
+            if (groups[2] == 'x') {
+                // get virtual address of code section in memory
+                auto code_section_start_address_in_memory = std::stol(groups[1], nullptr, 16);
+                // code section offset relative to process start in memory
+                auto code_section_offset_in_memory = std::stol(groups[3], nullptr, 16); 
+                int64_t process_start_address_in_memory = code_section_start_address_in_memory - code_section_offset_in_memory; 
+                return VirtualAddr(offset + process_start_address_in_memory);
+            }
+        }
+        zdb::Error::send("Could not find load address");
+    }
+}
 
 TEST_CASE("Process::launch Success", "[process]") {
     auto proc = Process::launch("yes");

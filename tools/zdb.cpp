@@ -99,7 +99,8 @@ namespace {
             std::cerr << R"(Available commands:
                 breakpoint - Commands for operating on breakpoints
                 continue - Resume the process
-                register - Commands for operating on registers)" << std::endl;
+                register - Commands for operating on registers
+                step - Step over a single instruction)" << std::endl;
         } else if (args[1] == "register") {
             std::cerr << R"(Available commands:
             read
@@ -255,9 +256,8 @@ namespace {
         } else if (is_prefix(sub_command, "delete")) {
             process.breakpoint_sites().remove_by_id(bp_id.value());
         } 
-
-
     }
+
     void handle_command(std::unique_ptr<zdb::Process> &process, std::string_view line) {
         auto args    = split(line, ' ');
         auto command = args[0];
@@ -271,6 +271,9 @@ namespace {
             handle_register_command(*process, args);
         } else if (is_prefix(command, "breakpoint")) {
             handle_breakpoint_command(*process, args);
+        } else if (is_prefix(command, "step")) {
+            auto stop_reason = process->step();
+            print_stop_reason(*process, stop_reason);
         } else {
             std::cerr << "Unknown command\n";
         }

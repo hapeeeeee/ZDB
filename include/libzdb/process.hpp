@@ -41,6 +41,7 @@ namespace zdb {
           std::optional<int> stdout_fd = std::nullopt
         );
         void resume();
+        StopReason step();
         StopReason wait_on_signal();
 
         void write_user_area(std::size_t offset, std::uint64_t data);

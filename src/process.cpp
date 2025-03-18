@@ -132,6 +132,26 @@ void zdb::Process::resume() {
     state_ = ProcessState::Running;
 }
 
+zdb::StopReason zdb::Process::step() {
+    std::optional<BreakpointSite*> to_reenable{nullptr};
+    auto pc = get_pc();
+    if (breakpoint_sites_.enabled_stoppoint_at_address(pc)) {
+        auto &bp = breakpoint_sites_.get_by_address(pc);
+        bp.disable();
+        to_reenable = &bp;
+    }
+
+    if (ptrace(PTRACE_SINGLESTEP, pid_, nullptr, nullptr) < 0) {
+        Error::send_errno("Single Step failed");
+    }
+    
+    StopReason stop_reason = wait_on_signal();
+    if (to_reenable) {
+        to_reenable.value()->enable();
+    }
+    return stop_reason;
+}
+
 zdb::StopReason zdb::Process::wait_on_signal() {
     int wait_status;
     if (waitpid(pid_, &wait_status, 0) < 0) {
@@ -172,7 +192,6 @@ void zdb::Process::read_all_registers() {
         get_registers().data_.u_debugreg[i] = data;
     }
 }
-
 
 void zdb::Process::write_user_area(std::size_t offset, std::uint64_t data) {
     if (ptrace(PTRACE_POKEUSER, pid_, offset, data) < 0) {
