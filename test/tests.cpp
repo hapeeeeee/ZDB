@@ -38,6 +38,7 @@ namespace {
     /// 所以可执行程序的加载地址是固定的，不存在指令加载地址和内存地址不同的情况
     /// 所以可以计算出可执行程序的入口指令的内存地址相对于程序加载内存地址的偏移 
     /// 计算方式是：入口指令的内存地址 = 程序的起始内存地址 + 入口指令的磁盘实际偏移 (get_load_address)
+    /// img desc: docs/breakpoint_site_set/testcase_for_calu_breakpointsite_set.png
 
     std::int64_t get_section_load_bias(std::filesystem::path path, Elf64_Addr vaddr) {
         auto command = std::string("readelf -WS ") + path.string();
@@ -51,7 +52,7 @@ namespace {
         size_t len = 0;
         while (getline(&line, &len, fd) != -1) {
             std::cmatch match;
-            if (std::regex_match(line, match, text_regex)) {
+            if (std::regex_search(line, match, text_regex)) {
                 auto address = std::stol(match[1], nullptr, 16);
                 auto offset = std::stol(match[2], nullptr, 16);
                 auto size = std::stol(match[3], nullptr, 16);
@@ -302,4 +303,34 @@ TEST_CASE("Can iterate breakpoint sites", "[breakpoint]") {
             REQUIRE(site->address().addr() == addr++);
         }
     );
+}
+
+TEST_CASE("Can remove breakpoint sites", "[breakpoint]") {
+    auto proc = Process::launch("bin/run_endlessly");
+    auto& site = proc->create_breakpoint_site(VirtualAddr{ 42 });
+    proc->create_breakpoint_site(VirtualAddr{ 43 });
+    REQUIRE(proc->breakpoint_sites().size() == 2);
+    proc->breakpoint_sites().remove_by_id(site.id());
+    proc->breakpoint_sites().remove_by_address(VirtualAddr{ 43 });
+    REQUIRE(proc->breakpoint_sites().empty());
+}
+
+TEST_CASE("Breakpoint site on address work", "[breakpoint]") {
+    bool close_on_exec = false;
+    zdb::Pipe pipe(close_on_exec);
+    auto proc = Process::launch("bin/hello_zdb", true, pipe.get_write());
+    pipe.close_write();
+    auto file_actual_offset_of_entry_code_in_disk = get_entry_point_offset("bin/hello_zdb");
+    auto memory_load_address_of_entry_code = get_load_address(proc->pid(), file_actual_offset_of_entry_code_in_disk);
+    proc->create_breakpoint_site(memory_load_address_of_entry_code).enable();
+    proc->resume();
+    StopReason reason = proc->wait_on_signal();
+    REQUIRE(reason.reason == ProcessState::Stopped);
+    REQUIRE(reason.info == SIGTRAP);
+    REQUIRE(proc->get_pc() == memory_load_address_of_entry_code);
+
+    proc->resume();
+    reason = proc->wait_on_signal();
+    auto data = pipe.read();
+    REQUIRE(to_string_view(data) == "Hello, ZDB!\n");
 }
