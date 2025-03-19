@@ -2,6 +2,7 @@
 #include <libzdb/pipe.hpp>
 #include <libzdb/process.hpp>
 #include <sys/personality.h>
+#include <sys/uio.h>
 namespace {
     void exit_with_perror(zdb::Pipe &pipe, const std::string &prefix) {
         std::string msg = prefix + ": " + std::strerror(errno);
@@ -221,4 +222,28 @@ zdb::BreakpointSite& zdb::Process::create_breakpoint_site(VirtualAddr address) {
         new BreakpointSite(*this, address)
     );
     return breakpoint_sites_.push(std::move(site));
+}
+
+std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t amount) {
+    std::vector<std::byte> result(amount);
+    iovec local_iov = {result.data(), result.size()};
+    std::vector<iovec> remote_iov;
+
+    while (amount > 0) {
+        auto remaining_in_current_mem_page = 0x1000 - (addr.addr() & 0xfff);
+        auto to_read = std::min(remaining_in_current_mem_page, amount);
+        remote_iov.push_back({reinterpret_cast<void*>(addr.addr()), to_read});
+        amount -= to_read;
+        addr += to_read;
+    }
+
+    if (process_vm_readv(
+        pid_, 
+        &local_iov, 1, 
+        remote_iov.data(), remote_iov.size(), 
+        0
+    ) < 0) {
+        Error::send_errno("Read memory failed");
+    }
+    return result;
 }

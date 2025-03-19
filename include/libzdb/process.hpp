@@ -50,23 +50,17 @@ namespace zdb {
 
         Registers& get_registers() { return *registers_; }
         const Registers& get_registers() const { return *registers_; }
-        VirtualAddr get_pc() const { 
-          return VirtualAddr(get_registers().read_by_id_as<std::uint64_t>(RegisterId::rip)); 
-        }
-        void set_pc(VirtualAddr addr) {
-          get_registers().write_by_id(RegisterId::rip, addr.addr());
-        }
+        VirtualAddr get_pc() const { return VirtualAddr(get_registers().read_by_id_as<std::uint64_t>(RegisterId::rip)); }
+        void set_pc(VirtualAddr addr) { get_registers().write_by_id(RegisterId::rip, addr.addr());}
 
         pid_t pid() const { return pid_;}
         ProcessState state() const { return state_;}
 
         BreakpointSite& create_breakpoint_site(VirtualAddr address);
+        StoppointCollection<BreakpointSite>& breakpoint_sites() { return breakpoint_sites_; }
+        const StoppointCollection<BreakpointSite>& breakpoint_sites() const { return breakpoint_sites_; }
 
-        StoppointCollection<BreakpointSite>& 
-        breakpoint_sites() { return breakpoint_sites_; }
-
-        const StoppointCollection<BreakpointSite>& 
-        breakpoint_sites() const { return breakpoint_sites_; }
+        std::vector<std::byte> read_memory(VirtualAddr addr, std::size_t amount);
 
       private:
         pid_t pid_             = 0;

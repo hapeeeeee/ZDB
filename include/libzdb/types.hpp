@@ -52,5 +52,23 @@ namespace zdb {
             uint64_t addr_;
     };
     
+    template<class T>
+    class Span {
+      public:
+        Span() = default;
+        Span(T* data, std::size_t size): data_(data), size_(size) {}
+        Span(T* data, T* end): data_(data), size_(end - data) {}
+        template<class U>
+        Span(const std::vector<U>& vec): data_(vec.data()), size_(vec.size()) {}
+
+        T* begin() const { return data_; }
+        T* end() const { return data_ + size_; }
+        T& operator[](std::size_t index) const { return *(data_ + index); }
+        std::size_t size() const { return size_; }
+
+      private:
+        T* data_ = nullptr;
+        std::size_t size_ = 0;
+    };
 }
 #endif // LIBZDB_TYPES_HPP
