@@ -100,6 +100,7 @@ namespace {
                 breakpoint - Commands for operating on breakpoints
                 continue - Resume the process
                 register - Commands for operating on registers
+                memory - Commands for operating on memory
                 step - Step over a single instruction)" << std::endl;
         } else if (args[1] == "register") {
             std::cerr << R"(Available commands:
@@ -114,6 +115,12 @@ namespace {
             enable <id>
             disable <id>
             delete <id>)" << std::endl;
+        } else if (is_prefix(args[1], "memory")) {
+            std::cerr << R"(Available commands:
+            read <address>
+            read <address> <number of bytes>
+            write <address> <bytes>
+            )";
         } else {
             std::cerr << "No help available on that\n";
         }
@@ -258,6 +265,57 @@ namespace {
         } 
     }
 
+    /// memory read addr size
+    void handle_memory_read_command(zdb::Process &process, const std::vector<std::string> &args) { 
+        auto address = zdb::to_integral<std::uint64_t>(args[2], 16);
+        if (!address) {
+            zdb::Error::send("Invalid address format");
+        }
+        auto n_bytes = 32;
+        if (args.size() == 4) {
+            auto bytes_arg = zdb::to_integral<std::size_t>(args[3]);
+            if (!bytes_arg) {
+                zdb::Error::send("Invalid number of bytes");
+            }
+            n_bytes = bytes_arg.value();
+        }
+        auto data = process.read_memory(zdb::VirtualAddr{address.value()}, n_bytes);
+        for (std::size_t i = 0; i < data.size(); i += 16) {
+            auto start = data.begin() + i;
+            auto end = data.begin() + std::min(i + 16, data.size());
+            fmt::print("{:#016x}: {:02x}\n", address.value() + i, fmt::join(start, end, " "));
+        }
+    }
+
+    void handle_memory_write_command(zdb::Process &process, const std::vector<std::string> &args) { 
+        if (args.size() != 4) {
+            print_help({"memory", "help"});
+            return;
+        }
+
+        auto address = zdb::to_integral<std::uint64_t>(args[2], 16);
+        if (!address) {
+            zdb::Error::send("Invalid address format");
+        }
+        auto data = zdb::parse_vector(args[3]);
+        process.write_memory(zdb::VirtualAddr{address.value()}, { data.data(), data.size() });
+    }
+
+    void handle_memory_command(zdb::Process &process, const std::vector<std::string> &args) {
+        if (args.size() < 3) {
+            print_help({"memory", "help"});
+            return;
+        }
+
+        if (is_prefix(args[1], "read")) {
+            handle_memory_read_command(process, args);
+        } else if (is_prefix(args[1], "write")) {
+            handle_memory_write_command(process, args);
+        } else {
+            print_help({"memory", "help"});
+        }
+    }
+
     void handle_command(std::unique_ptr<zdb::Process> &process, std::string_view line) {
         auto args    = split(line, ' ');
         auto command = args[0];
@@ -274,6 +332,8 @@ namespace {
         } else if (is_prefix(command, "step")) {
             auto stop_reason = process->step();
             print_stop_reason(*process, stop_reason);
+        } else if (is_prefix(command, "memory")) {
+            handle_memory_command(*process, args);
         } else {
             std::cerr << "Unknown command\n";
         }

@@ -11,6 +11,7 @@
 #include <optional>
 #include <libzdb/breakpoint_site.hpp>
 #include <libzdb/stoppoint_collection.hpp>
+#include <libzdb/bit.hpp>
 namespace zdb {
     enum class ProcessState {
         Running,
@@ -60,7 +61,14 @@ namespace zdb {
         StoppointCollection<BreakpointSite>& breakpoint_sites() { return breakpoint_sites_; }
         const StoppointCollection<BreakpointSite>& breakpoint_sites() const { return breakpoint_sites_; }
 
+        template<class T>
+        T read_memory_as(VirtualAddr addr) {
+          std::vector<std::byte> data = read_memory(addr, sizeof(T));  
+          return from_bytes_as<T>(data.data());
+        }
         std::vector<std::byte> read_memory(VirtualAddr addr, std::size_t amount);
+        void write_memory(VirtualAddr address, Span<const std::byte> data);
+
 
       private:
         pid_t pid_             = 0;

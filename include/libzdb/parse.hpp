@@ -67,5 +67,26 @@ namespace zdb {
         }
         return ret;
     }
+
+    inline std::vector<std::byte> parse_vector(std::string_view text) {
+        std::vector<std::byte> bytes;
+        const char* c = text.data();
+        if (*c++ != '[') {
+            zdb::Error::send("Invalid format");
+        };
+        while (*c != ']') {
+            auto byte = zdb::to_integral<std::byte>({ c, 4 }, 16);
+            bytes.push_back(byte.value());
+            c += 4;
+            if (*c == ',') ++c;
+            else if (*c != ']') {
+                zdb::Error::send("Invalid format");
+            };
+        }
+        if (++c != text.end()) {
+            zdb::Error::send("Invalid format");
+        };
+        return bytes;
+    }
 }
 #endif // ZDB_PARSE_HPP

@@ -3,6 +3,8 @@
 #include <libzdb/process.hpp>
 #include <sys/personality.h>
 #include <sys/uio.h>
+#include <libzdb/bit.hpp>
+
 namespace {
     void exit_with_perror(zdb::Pipe &pipe, const std::string &prefix) {
         std::string msg = prefix + ": " + std::strerror(errno);
@@ -229,6 +231,7 @@ std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t a
     iovec local_iov = {result.data(), result.size()};
     std::vector<iovec> remote_iov;
 
+    /// why page-by-page read???
     while (amount > 0) {
         auto remaining_in_current_mem_page = 0x1000 - (addr.addr() & 0xfff);
         auto to_read = std::min(remaining_in_current_mem_page, amount);
@@ -246,4 +249,28 @@ std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t a
         Error::send_errno("Read memory failed");
     }
     return result;
+}
+
+void zdb::Process::write_memory(VirtualAddr address, Span<const std::byte> data) {
+    std::size_t written = 0;
+    while (written < data.size()) {
+        std::uint64_t qword;
+        auto remaining_data_size = data.size() - written;
+        if (remaining_data_size >= 8) {
+            qword = from_bytes_as<std::uint64_t>(data.begin() + written);
+        } else {
+            auto curr_mem_data = read_memory(address + written, 8);
+            auto to_write_data_ptr = reinterpret_cast<std::byte*>(&qword);
+            std::memcpy(to_write_data_ptr, data.begin() + written, remaining_data_size);
+            std::memcpy(
+                to_write_data_ptr + remaining_data_size, 
+                curr_mem_data.data() + remaining_data_size, 
+                8 - remaining_data_size
+            );
+        }
+        if (ptrace(PTRACE_POKEDATA, pid_, address + written, qword) < 0) {
+            Error::send_errno("Write Mem failed");
+        }
+        written += 8;
+    }
 }

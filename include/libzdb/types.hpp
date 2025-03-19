@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace zdb {
     using byte64 = std::array<std::byte, 8>;
