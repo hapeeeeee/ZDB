@@ -226,7 +226,7 @@ zdb::BreakpointSite& zdb::Process::create_breakpoint_site(VirtualAddr address) {
     return breakpoint_sites_.push(std::move(site));
 }
 
-std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t amount) {
+std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t amount) const {
     std::vector<std::byte> result(amount);
     iovec local_iov = {result.data(), result.size()};
     std::vector<iovec> remote_iov;
@@ -249,6 +249,19 @@ std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t a
         Error::send_errno("Read memory failed");
     }
     return result;
+}
+
+std::vector<std::byte> zdb::Process::read_memory_without_trap(VirtualAddr addr, std::size_t amount) { 
+    auto mem_data = read_memory(addr, amount);
+    std::vector<BreakpointSite&> sites = breakpoint_sites_.get_in_region(addr, addr + amount);
+    for (auto site : sites) {
+        if (!site.is_enabled()) {
+            continue;
+        }
+        auto offset = site.address() - addr.addr();
+        mem_data[offset.addr()] = site.saved_data();   
+    }
+    return mem_data;
 }
 
 void zdb::Process::write_memory(VirtualAddr address, Span<const std::byte> data) {

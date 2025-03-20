@@ -11,7 +11,7 @@ std::vector<zdb::Disassembler::Instruction> zdb::Disassembler::disassemble(
     if (!address) {
         address.emplace(proc_.get_pc());
     }
-    auto code = proc_.read_memory(address.value(), n_instructions * 15);
+    auto code = proc_.read_memory_without_trap(address.value(), n_instructions * 15);
 
     ZyanUSize offset = 0;
     ZydisDisassembledInstruction instr;

@@ -20,6 +20,7 @@ namespace zdb {
         const Stoppoint& get_by_id(typename Stoppoint::id_type id) const;
         Stoppoint& get_by_address(VirtualAddr address);
         const Stoppoint& get_by_address(VirtualAddr address) const;
+        std::vector<Stoppoint&> get_in_region(VirtualAddr low, VirtualAddr high);
 
         void remove_by_id(typename Stoppoint::id_type id);
         void remove_by_address(VirtualAddr address);
@@ -89,6 +90,17 @@ namespace zdb {
     template <class Stoppoint>
     const Stoppoint& StoppointCollection<Stoppoint>::get_by_address(VirtualAddr address) const {
         return const_cast<StoppointCollection*>(this)->get_by_address(address);
+    }
+
+    template <class Stoppoint>
+    std::vector<Stoppoint&> StoppointCollection<Stoppoint>::get_in_region(VirtualAddr low, VirtualAddr high) {
+        std::vector<Stoppoint&> result;
+        for (auto &stoppoint : stoppoints_) {
+            if (stoppoint->in_range(low, high)) {
+                result.push_back(*stoppoint);
+            }
+        }
+        return result;
     }
 
     template <class Stoppoint>

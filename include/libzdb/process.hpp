@@ -66,7 +66,8 @@ namespace zdb {
           std::vector<std::byte> data = read_memory(addr, sizeof(T));  
           return from_bytes_as<T>(data.data());
         }
-        std::vector<std::byte> read_memory(VirtualAddr addr, std::size_t amount);
+        std::vector<std::byte> read_memory(VirtualAddr addr, std::size_t amount) const;
+        std::vector<std::byte> read_memory_without_trap(VirtualAddr addr, std::size_t amount);
         void write_memory(VirtualAddr address, Span<const std::byte> data);
 
 

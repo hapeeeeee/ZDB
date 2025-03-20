@@ -20,6 +20,7 @@ class Process;
 
         id_type id() const { return id_; }
         VirtualAddr address() const { return address_; }
+        std::byte saved_data() const { return saved_data_; }
 
         void enable();
         void disable();
