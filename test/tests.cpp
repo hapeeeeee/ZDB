@@ -334,3 +334,31 @@ TEST_CASE("Breakpoint site on address work", "[breakpoint]") {
     auto data = pipe.read();
     REQUIRE(to_string_view(data) == "Hello, ZDB!\n");
 }
+
+TEST_CASE("Reading and writing memory works", "[memory]") {
+    bool close_on_exec = false;
+    zdb::Pipe channel(close_on_exec);
+    auto proc = Process::launch("bin/memory", true, channel.get_write());
+    channel.close_write();
+    proc->resume();
+    proc->wait_on_signal();
+    auto a_pointer = from_bytes_as<std::uint64_t>(channel.read().data());
+    auto data_vec = proc->read_memory(VirtualAddr{ a_pointer }, 8);
+    auto data = from_bytes_as<std::uint64_t>(data_vec.data());
+    REQUIRE(data == 0xcafecafe);
+
+
+    proc->resume();
+    proc->wait_on_signal();
+    auto buf_pointer = from_bytes_as<std::uint64_t>(channel.read().data());
+    std::string_view str = "Hello, ZDB!\n";
+    proc->write_memory(
+        VirtualAddr{ buf_pointer }, 
+        {reinterpret_cast<const std::byte*>(str.data()), str.size()}
+    );
+    proc->resume();
+    proc->wait_on_signal();
+    auto result = channel.read();
+    REQUIRE(to_string_view(result) == "Hello, ZDB!\n");
+}
+

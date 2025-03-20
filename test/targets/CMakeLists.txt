@@ -13,6 +13,7 @@ endfunction()
 add_test_cpp_executable(run_endlessly)
 add_test_cpp_executable(end_immediately)
 add_test_cpp_executable(hello_zdb)
+add_test_cpp_executable(memory)
 
 add_test_asm_executable(reg_write)
 add_test_asm_executable(reg_read)
