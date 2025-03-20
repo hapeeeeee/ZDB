@@ -251,15 +251,15 @@ std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t a
     return result;
 }
 
-std::vector<std::byte> zdb::Process::read_memory_without_trap(VirtualAddr addr, std::size_t amount) { 
+std::vector<std::byte> zdb::Process::read_memory_without_trap(VirtualAddr addr, std::size_t amount) const { 
     auto mem_data = read_memory(addr, amount);
-    std::vector<BreakpointSite&> sites = breakpoint_sites_.get_in_region(addr, addr + amount);
+    std::vector<BreakpointSite*> sites = breakpoint_sites_.get_in_region(addr, addr + amount);
     for (auto site : sites) {
-        if (!site.is_enabled()) {
+        if (!site->is_enabled()) {
             continue;
         }
-        auto offset = site.address() - addr.addr();
-        mem_data[offset.addr()] = site.saved_data();   
+        auto offset = site->address() - addr.addr();
+        mem_data[offset.addr()] = site->saved_data();   
     }
     return mem_data;
 }
