@@ -1,7 +1,6 @@
-#include <vector>
 #ifndef LIBZDB_PIPE_HPP
 #define LIBZDB_PIPE_HPP
-
+#include <vector>
 namespace zdb {
     class Pipe {
       public:

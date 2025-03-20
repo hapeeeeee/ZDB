@@ -1,5 +1,5 @@
-#ifndef ZDB_PARSE_HPP
-#define ZDB_PARSE_HPP
+#ifndef LIBZDB_PARSE_HPP
+#define LIBZDB_PARSE_HPP
 
 #include <charconv>
 #include <cstdint>
@@ -89,4 +89,4 @@ namespace zdb {
         return bytes;
     }
 }
-#endif // ZDB_PARSE_HPP
+#endif // LIBZDB_PARSE_HPP

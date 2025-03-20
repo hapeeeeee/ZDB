@@ -2,6 +2,7 @@
     "dependencies": [
         "libedit",
         "catch2",
-        "fmt"
+        "fmt",
+        "zydis"
     ]
 }

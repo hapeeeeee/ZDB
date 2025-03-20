@@ -1,5 +1,5 @@
-#ifndef ZDB_ERROR_HPP
-#define ZDB_ERROR_HPP
+#ifndef LIBZDB_ERROR_HPP
+#define LIBZDB_ERROR_HPP
 
 #include <cstring>
 #include <stdexcept>
@@ -21,4 +21,4 @@ namespace zdb {
     };
 } // namespace zdb
 
-#endif // ZDB_ERROR_HPP
+#endif // LIBZDB_ERROR_HPP
