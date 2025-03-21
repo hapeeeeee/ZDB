@@ -71,5 +71,11 @@ namespace zdb {
         T* data_ = nullptr;
         std::size_t size_ = 0;
     };
+
+    enum class StopPointMode {
+        Write,
+        ReadWrite,
+        Execute,
+    };
 }
 #endif // LIBZDB_TYPES_HPP

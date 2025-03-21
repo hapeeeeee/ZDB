@@ -25,6 +25,8 @@ class Process;
         void enable();
         void disable();
         bool is_enabled() const { return is_enabled_; }
+        bool is_hardware() const { return is_hardware_; }
+        bool is_internal() const { return is_internal_; }
         bool at_address(VirtualAddr address) const {
             return address_ == address;
         }
@@ -34,13 +36,21 @@ class Process;
 
       private:
         id_type id_;
+        int hardware_register_id_ = -1;
         bool is_enabled_;
+        bool is_hardware_;
+        bool is_internal_;
         VirtualAddr address_;
         Process* proc_;
         std::byte saved_data_;
         
         friend Process;
-        BreakpointSite(Process& proc, VirtualAddr address);
+        BreakpointSite(
+            Process& proc, 
+            VirtualAddr address, 
+            bool is_internal = false, 
+            bool is_hardware = false
+        );
     };
 
     } // namespace libzdb

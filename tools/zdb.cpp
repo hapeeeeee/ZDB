@@ -72,8 +72,6 @@ namespace {
         // unreacheable
         zdb::Error::send("Invalid format");
     }
-    
-
 
     void print_stop_reason(const zdb::Process &process, zdb::StopReason &stop_reason) {
         std::string message;
@@ -113,7 +111,7 @@ namespace {
         } else if (args[1] == "breakpoint") {
             std::cerr << R"(Available commands:
             list
-            set <address>
+            set <address> [-h]
             enable <id>
             disable <id>
             delete <id>)" << std::endl;
@@ -217,6 +215,7 @@ namespace {
         fmt::print("Current Breakpoints:\n");
         process.breakpoint_sites().for_each(
             [&](auto &site) {
+                if (site->is_interal()) return;
                 fmt::print("{}: address = {:#x}, enabled = {}\n", 
                     site->id(), 
                     site->address().addr(), 
@@ -226,9 +225,8 @@ namespace {
         );
     }
 
-    void handle_breakpoint_set_command(zdb::Process &process, const std::string &sub_cmd_arg) {
-        auto address = zdb::to_integral<std::uint64_t>(sub_cmd_arg, 16);
-
+    void handle_breakpoint_set_command(zdb::Process &process, const std::vector<std::string> &args) {
+        auto address = zdb::to_integral<std::uint64_t>(args[2], 16);
         if (!address) {
             fmt::print(
                 stderr,
@@ -237,7 +235,13 @@ namespace {
             return;
         }
 
-        process.create_breakpoint_site(zdb::VirtualAddr(address.value())).enable();
+        bool is_hardware = false;
+        if (args.size() == 4) {
+            if (args[3] == "-h") is_hardware = true;
+            else zdb::Error::send("Invalid argument");
+        }
+
+        process.create_breakpoint_site(zdb::VirtualAddr(address.value()), is_hardware = is_hardware).enable();
         fmt::print("Breakpoint set at {:#x}\n", address.value());
     }
 
@@ -257,8 +261,8 @@ namespace {
             print_help({"help", "breakpoint"});
             return;
         }
-        if (is_prefix(sub_command, "set")) {
-            handle_breakpoint_set_command(process, args[2]);
+        if (is_prefix(sub_command, "set")) {    
+            handle_breakpoint_set_command(process, args);
             return;
         } 
 

@@ -57,9 +57,12 @@ namespace zdb {
         pid_t pid() const { return pid_;}
         ProcessState state() const { return state_;}
 
-        BreakpointSite& create_breakpoint_site(VirtualAddr address);
+        BreakpointSite& create_breakpoint_site(VirtualAddr address, bool is_internal = false, bool is_hardware = false);
         StoppointCollection<BreakpointSite>& breakpoint_sites() { return breakpoint_sites_; }
         const StoppointCollection<BreakpointSite>& breakpoint_sites() const { return breakpoint_sites_; }
+        int set_hardware_breakpoint(BreakpointSite::id_type id, VirtualAddr address);
+        int set_hardware_breakpoint(VirtualAddr address, StopPointMode mode, std::size_t size);
+        void clear_hardware_breakpoint(int id);
 
         template<class T>
         T read_memory_as(VirtualAddr addr) {

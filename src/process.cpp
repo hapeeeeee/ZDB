@@ -214,14 +214,14 @@ void zdb::Process::write_gprs(const user_regs_struct& gprs) {
     }
 }
 
-zdb::BreakpointSite& zdb::Process::create_breakpoint_site(VirtualAddr address) {
+zdb::BreakpointSite& zdb::Process::create_breakpoint_site(VirtualAddr address, bool is_internal, bool is_hardware) {
     if (breakpoint_sites_.contains_address(address)) {
         Error::send(
             "Breakpoint site already exists as address " + std::to_string(address.addr())
         );
     }
     auto site = std::unique_ptr<BreakpointSite>(
-        new BreakpointSite(*this, address)
+        new BreakpointSite(*this, address, is_internal, is_hardware)
     );
     return breakpoint_sites_.push(std::move(site));
 }
@@ -255,7 +255,7 @@ std::vector<std::byte> zdb::Process::read_memory_without_trap(VirtualAddr addr, 
     auto mem_data = read_memory(addr, amount);
     std::vector<BreakpointSite*> sites = breakpoint_sites_.get_in_region(addr, addr + amount);
     for (auto site : sites) {
-        if (!site->is_enabled()) {
+        if (!site->is_enabled() || site->is_hardware()) {
             continue;
         }
         auto offset = site->address() - addr.addr();
@@ -286,4 +286,16 @@ void zdb::Process::write_memory(VirtualAddr address, Span<const std::byte> data)
         }
         written += 8;
     }
+}
+
+int zdb::Process::set_hardware_breakpoint(BreakpointSite::id_type id, VirtualAddr address) {
+    return set_hardware_breakpoint(address, StopPointMode::Execute, 1);
+}
+
+int zdb::Process::set_hardware_breakpoint(VirtualAddr address, StopPointMode mode, std::size_t size) {
+    auto &regs = get_registers();
+    auto data_controler_dr7 = regs.read_by_id_as<std::uint64_t>(RegisterId::dr7);
+    int free_dr_index = find_free_stoppoint_register(data_controler_dr7);
+    auto free_dr_id = static_cast<int>(RegisterId::dr0) + free_dr_index;
+    auto data_controler = regs.write_by_id(static_cast<RegisterId>(free_dr_id), address.addr());
 }
