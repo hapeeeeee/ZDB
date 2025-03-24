@@ -215,7 +215,7 @@ namespace {
         fmt::print("Current Breakpoints:\n");
         process.breakpoint_sites().for_each(
             [&](auto &site) {
-                if (site->is_interal()) return;
+                if (site->is_internal()) return;
                 fmt::print("{}: address = {:#x}, enabled = {}\n", 
                     site->id(), 
                     site->address().addr(), 

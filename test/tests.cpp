@@ -362,3 +362,35 @@ TEST_CASE("Reading and writing memory works", "[memory]") {
     REQUIRE(to_string_view(result) == "Hello, ZDB!\n");
 }
 
+TEST_CASE("Hardware breakpoint evades memory checksums", "[breakpoint]") {
+    Pipe channel(false);
+    auto proc = Process::launch("bin/anti_debugger", true, channel.get_write());
+    channel.close_write();
+
+    proc->resume();
+    proc->wait_on_signal();
+
+    std::vector<std::byte> str_of_func_addr = channel.read();
+    VirtualAddr func_addr = VirtualAddr(from_bytes_as<std::uint64_t>(str_of_func_addr.data()));
+
+    BreakpointSite &soft_bp = proc->create_breakpoint_site(func_addr, false, false);
+    soft_bp.enable();
+    proc->resume();
+    proc->wait_on_signal();
+    REQUIRE(to_string_view(channel.read()) == "Putting pepperoni on pizza...\n");
+
+    proc->breakpoint_sites().remove_by_id(soft_bp.id());
+    proc->resume();
+    proc->wait_on_signal();
+    REQUIRE(to_string_view(channel.read()) == "Putting pineapple on pizza...\n");
+
+    BreakpointSite &hard_bp = proc->create_breakpoint_site(func_addr, false, true);
+    hard_bp.enable();
+    proc->resume();
+    proc->wait_on_signal();
+    REQUIRE(func_addr == proc->get_pc());
+
+    proc->resume();
+    proc->wait_on_signal();
+    REQUIRE(to_string_view(channel.read()) == "Putting pineapple on pizza...\n");
+}

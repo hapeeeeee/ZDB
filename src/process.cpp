@@ -11,6 +11,43 @@ namespace {
         pipe.write(reinterpret_cast<std::byte *>(msg.data()), msg.size());
         exit(-1);
     }
+
+    int find_free_stoppoint_register(std::uint64_t data_of_controler_dr7) {
+        for (int i = 0; i < 4; ++i) {
+            if ((data_of_controler_dr7 & (0b11 << (i * 2))) == 0) {
+                return i;
+            }
+        }
+        zdb::Error::send("No remaining hardware debug registers");
+    }
+
+    std::uint64_t encode_hardware_breakpoint_mode(zdb::StopPointMode mode) {
+        switch (mode) {
+            case zdb::StopPointMode::Execute:
+                return 0b00;
+            case zdb::StopPointMode::Write:
+                return 0b01;
+            case zdb::StopPointMode::ReadWrite:
+                return 0b11;
+            default:
+                zdb::Error::send("Invalid stop point mode");
+        }
+    }
+
+    std::uint64_t encode_hardware_breakpoint_size(std::size_t size) {
+        switch (size) {
+            case 1:
+                return 0b00;
+            case 2:
+                return 0b01;
+            case 4:
+                return 0b11;
+            case 8:
+                return 0b10;
+            default:
+                zdb::Error::send("Invalid hardware breakpoint size");
+        }
+    }
 } // namespace
 
 zdb::StopReason::StopReason(int wait_status) {
@@ -294,8 +331,33 @@ int zdb::Process::set_hardware_breakpoint(BreakpointSite::id_type id, VirtualAdd
 
 int zdb::Process::set_hardware_breakpoint(VirtualAddr address, StopPointMode mode, std::size_t size) {
     auto &regs = get_registers();
-    auto data_controler_dr7 = regs.read_by_id_as<std::uint64_t>(RegisterId::dr7);
-    int free_dr_index = find_free_stoppoint_register(data_controler_dr7);
+    auto data_of_controler_dr7 = regs.read_by_id_as<std::uint64_t>(RegisterId::dr7);
+    int free_dr_index = find_free_stoppoint_register(data_of_controler_dr7);
     auto free_dr_id = static_cast<int>(RegisterId::dr0) + free_dr_index;
-    auto data_controler = regs.write_by_id(static_cast<RegisterId>(free_dr_id), address.addr());
+    regs.write_by_id(static_cast<RegisterId>(free_dr_id), address.addr());
+
+    uint64_t mode_flag = encode_hardware_breakpoint_mode(mode);
+    uint64_t size_flag = encode_hardware_breakpoint_size(size);
+    uint64_t enable_bit = (1 << free_dr_index * 2);
+    uint64_t mode_bit = (mode_flag << (free_dr_index * 4 + 16));
+    uint64_t size_bit = (size_flag << (free_dr_index * 4 + 18));
+
+    auto mask = (0b11 << (free_dr_index * 2)) | (0b1111 << (free_dr_index * 4 + 16));
+    auto data_of_masked_dr7 = data_of_controler_dr7 & ~mask;
+    data_of_masked_dr7 |= enable_bit | mode_bit | size_bit;
+    regs.write_by_id(RegisterId::dr7, data_of_masked_dr7);
+    return free_dr_index;
+}
+
+
+void zdb::Process::clear_hardware_breakpoint(int id) {
+    auto &regs = get_registers();
+    auto dr_id = static_cast<int>(RegisterId::dr0) + id;
+    auto reg_dr_id = static_cast<RegisterId>(dr_id);
+    regs.write_by_id(reg_dr_id, 0);
+
+    auto data_of_controler_dr7 = regs.read_by_id_as<std::uint64_t>(RegisterId::dr7);
+    auto mask = (0b11 << (id * 2)) | (0b1111 << (id * 4 + 16));
+    auto data_of_masked_dr7 = data_of_controler_dr7 & ~mask;
+    regs.write_by_id(RegisterId::dr7, data_of_masked_dr7);
 }
