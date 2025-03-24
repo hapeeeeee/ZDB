@@ -361,3 +361,16 @@ void zdb::Process::clear_hardware_breakpoint(int id) {
     auto data_of_masked_dr7 = data_of_controler_dr7 & ~mask;
     regs.write_by_id(RegisterId::dr7, data_of_masked_dr7);
 }
+
+int zdb::Process::set_watchpoint(Watchpoint::id_type id, VirtualAddr address, StopPointMode mode, std::size_t size) {
+    return set_hardware_breakpoint(address, mode, size);
+}
+
+zdb::Watchpoint& zdb::Process::create_watchpoint(zdb::VirtualAddr addr, zdb::StopPointMode mode, std::size_t size) {
+    if (watchpoints_.contains_address(addr)) {
+        zdb::Error::send("Watchpoint already exists as address " + std::to_string(addr.addr()));
+    }
+
+    auto point = std::unique_ptr<Watchpoint>(new Watchpoint(*this, addr, mode, size));
+    return watchpoints_.push(std::move(point));
+}

@@ -98,6 +98,7 @@ namespace {
             std::cerr << R"(Available commands:
                 disassemble - Disassemble machine code to assembly
                 breakpoint  - Commands for operating on breakpoints
+                watchpoint  - Commands for operating on watchpoints
                 continue    - Resume the process
                 register    - Commands for operating on registers
                 memory      - Commands for operating on memory
@@ -126,7 +127,15 @@ namespace {
             -c <number of instructions>
             -a <start address>
             )";
-        } else {
+        } else if (is_prefix(args[1], "watchpoint")) {
+            std::cerr << R"(Available commands:
+            list
+            delete <id>
+            disable <id>
+            enable <id>
+            set <address> <write|rw|execute> <size>
+            )";
+        }else {
             std::cerr << "No help available on that\n";
         }
     }
@@ -335,7 +344,7 @@ namespace {
         }
     }
 
-    void handle_disassemble_command(zdb::Process &process, const std::vector<std::string> args) {
+    void handle_disassemble_command(zdb::Process &process, const std::vector<std::string> &args) {
         zdb::VirtualAddr address = process.get_pc();
         std::size_t n_instructions = 5;
         auto it = args.begin() + 1;
@@ -360,6 +369,92 @@ namespace {
                 print_help({"help", "disassemble"});
                 return;
             }
+        }
+    }
+
+    void handle_watchpoint_list_command(zdb::Process& process, const std::vector<std::string>& args) {
+        auto stoppoint_mode_to_string = [](auto mode) {
+            switch (mode) {
+                case zdb::StopPointMode::Execute: return "execute";
+                case zdb::StopPointMode::Write: return "write";
+                case zdb::StopPointMode::ReadWrite: return "read_write";
+                default: zdb::Error::send("Invalid stoppoint mode");
+            }
+        };
+        if (process.watchpoints().empty()) {
+            fmt::print("No watchpoints set\n");
+        }
+        else {
+            fmt::print("Current watchpoints:\n");
+            process.watchpoints().for_each(
+                [&](auto& point) {
+                    fmt::print("{}: address = {:#x}, mode = {}, size = {}, {}\n",
+                        point->id(), 
+                        point->address().addr(),
+                        stoppoint_mode_to_string(point->mode()), 
+                        point->size(),
+                        point->is_enabled() ? "enabled" : "disabled"
+                    );
+                }
+            );
+        }
+    }
+
+    void handle_watchpoint_set_command(zdb::Process& process, const std::vector<std::string>& args) {
+        if (args.size() < 5) {
+            print_help({"help", "watchpoint"});
+            return;
+        }
+        auto addr = zdb::to_integral<std::uint64_t>(args[2], 16);
+        auto mode_text = args[3];
+        auto size = zdb::to_integral<std::size_t>(args[4], 10);
+        if (!addr || !size || !(mode_text == "w" || mode_text == "rw" || mode_text == "exec") ) {
+            print_help({"help", "watchpoint"});
+        }
+
+        zdb::StopPointMode mode;
+        if (mode_text == "write") mode = zdb::StopPointMode::Write;
+        else if (mode_text == "rw") mode = zdb::StopPointMode::ReadWrite;
+        else if (mode_text == "execute") mode = zdb::StopPointMode::Execute;
+
+        process.create_watchpoint(zdb::VirtualAddr(addr.value()), mode, size.value()).enable();
+    }
+
+    void handle_watchpoint_command(zdb::Process &process, const std::vector<std::string> &args) {
+        // watchpoint set <address> <mode> <size>
+        // watchpoint enable/disable/delete <id>
+        if (args.size() < 2) {
+            print_help({"help", "watchpoint"});
+            return;
+        }
+
+        if (is_prefix(args[1], "list")) {
+            handle_watchpoint_list_command(process, args);
+            return;
+        }
+
+        if (args[1] == "set") {
+            handle_watchpoint_set_command(process, args);
+            return;
+        }  
+
+        if (args.size() < 3) {
+            print_help({"help", "watchpoint"});
+            return;
+        }
+
+        auto id_opt = zdb::to_integral<zdb::Watchpoint::id_type>(args[2], 10);
+        if (!id_opt) {
+            zdb::Error::send("Invalid id format");
+        }
+        else if (args[1] == "enable") {
+            process.watchpoints().get_by_id(id_opt.value()).enable();
+        } else if (args[1] == "disable") {
+            process.watchpoints().get_by_id(id_opt.value()).disable();
+        } else if (args[1] == "delete") {
+            process.watchpoints().remove_by_id(id_opt.value());
+        } else {
+            print_help({"help", "watchpoint"});
         }
     }
 
@@ -391,6 +486,8 @@ namespace {
             handle_memory_command(*process, args);
         } else if (is_prefix(command, "disassemble")) {
             handle_disassemble_command(*process, args);
+        } else if (is_prefix(command, "watchpoint")) {
+            handle_watchpoint_command(*process, args);
         } else {
             std::cerr << "Unknown command\n";
         }

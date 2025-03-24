@@ -12,6 +12,8 @@
 #include <libzdb/breakpoint_site.hpp>
 #include <libzdb/stoppoint_collection.hpp>
 #include <libzdb/bit.hpp>
+#include <libzdb/watchpoint.hpp>
+
 namespace zdb {
     enum class ProcessState {
         Running,
@@ -62,6 +64,12 @@ namespace zdb {
         const StoppointCollection<BreakpointSite>& breakpoint_sites() const { return breakpoint_sites_; }
         int set_hardware_breakpoint(BreakpointSite::id_type id, VirtualAddr address);
         int set_hardware_breakpoint(VirtualAddr address, StopPointMode mode, std::size_t size);
+
+        Watchpoint& create_watchpoint(VirtualAddr addr, StopPointMode mode, std::size_t size);
+        StoppointCollection<Watchpoint>& watchpoints() { return watchpoints_; }
+        const StoppointCollection<Watchpoint>& watchpoints() const { return watchpoints_; }
+        int set_watchpoint(Watchpoint::id_type id, VirtualAddr address, StopPointMode mode, std::size_t size);
+
         void clear_hardware_breakpoint(int id);
 
         template<class T>
@@ -81,6 +89,7 @@ namespace zdb {
         ProcessState state_    = ProcessState::Stopped;
         std::unique_ptr<Registers> registers_;
         StoppointCollection<BreakpointSite> breakpoint_sites_;
+        StoppointCollection<Watchpoint> watchpoints_;
 
       private:
         Process(pid_t pid, bool terminate_on_end, bool is_attached)
