@@ -7,6 +7,15 @@
 #include <fmt/ranges.h>
 #include <libzdb/parse.hpp>
 #include <libzdb/disassembler.hpp>
+
+namespace {
+    zdb::Process *g_zdb_process = nullptr;
+    void handle_sigint(int) {
+        kill(g_zdb_process->pid(), SIGSTOP);
+    }
+}
+
+
 namespace {
     std::unique_ptr<zdb::Process> attach(int argc, const char **argv) {
         // Passing PID
@@ -525,6 +534,8 @@ int main(int argc, const char **argv) {
 
     try {
         auto process = attach(argc, argv);
+        g_zdb_process = process.get();
+        signal(SIGINT, handle_sigint);
         main_loop(process);
     } catch (const zdb::Error &err) {
         std::cout << err.what() << '\n';

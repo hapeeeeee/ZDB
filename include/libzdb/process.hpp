@@ -22,11 +22,18 @@ namespace zdb {
         Terminated,
     };
 
+    enum class TrapType {
+      Unknown,
+      SignalStep,
+      SoftwareBreakpoint,
+      HardwareBreakpoint,
+    };
+
     struct StopReason {
         StopReason(int wait_status);
-
         ProcessState reason;
         std::uint8_t info;
+        std::optional<TrapType> trap_type;
     };
 
     class Process {
@@ -46,6 +53,8 @@ namespace zdb {
         void resume();
         StopReason step();
         StopReason wait_on_signal();
+        void augment_trap_type(StopReason &reason);
+        
 
         void write_user_area(std::size_t offset, std::uint64_t data);
         void write_fprs(const user_fpregs_struct& fprs);

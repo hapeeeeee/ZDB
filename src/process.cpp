@@ -107,6 +107,9 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(
         Error::send_errno("Fork failed");
     } else if (pid == 0) {
         // Now in child process, execute the debuggee
+        if (setpgid(0, 0) < 0) {
+            exit_with_perror(channel, "Setpgid failed");
+        }
         personality(ADDR_NO_RANDOMIZE);
         channel.close_read();
         if (stdout_fd) {
@@ -202,7 +205,7 @@ zdb::StopReason zdb::Process::wait_on_signal() {
 
     if (is_attached_ && state_ == ProcessState::Stopped) {
         read_all_registers();
-
+        augment_trap_type(stop_reason);
         auto instr_begin = get_pc() - 1;
         if (stop_reason.info == SIGTRAP and
             breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)) {
@@ -211,6 +214,29 @@ zdb::StopReason zdb::Process::wait_on_signal() {
     }
 
     return stop_reason;
+}
+
+void zdb::Process::augment_trap_type(StopReason &reason) {
+    siginfo_t info;
+    if (ptrace(PTRACE_GETSIGINFO, pid_, nullptr, &info) < 0) {
+        Error::send_errno("Get signal info failed");
+    }
+    reason.trap_type = TrapType::Unknown;
+    if (info.si_signo == SIGTRAP) {
+        switch (info.si_code) {
+            case TRAP_TRACE:
+                reason.trap_type = TrapType::SignalStep;
+                break;
+            case SI_KERNEL:
+                reason.trap_type = TrapType::SoftwareBreakpoint;
+                break;
+            case TRAP_HWBKPT:
+                reason.trap_type = TrapType::HardwareBreakpoint;
+                break;
+            default:
+                break;
+        }
+    }
 }
 
 void zdb::Process::read_all_registers() {
