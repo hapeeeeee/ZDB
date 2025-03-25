@@ -45,7 +45,7 @@ void zdb::BreakpointSite::disable() {
     }
 
     if (is_hardware_) {
-        proc_->clear_hardware_breakpoint(hardware_register_id_);
+        proc_->clear_hardware_stoppoint(hardware_register_id_);
         hardware_register_id_ = -1;
     } else {
         errno = 0;

@@ -207,10 +207,17 @@ zdb::StopReason zdb::Process::wait_on_signal() {
         read_all_registers();
         augment_trap_type(stop_reason);
         auto instr_begin = get_pc() - 1;
-        if (stop_reason.info == SIGTRAP and
-            breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)) {
-            set_pc(instr_begin);
+        if (stop_reason.info == SIGTRAP) {
+            if (stop_reason.trap_type == TrapType::SoftwareBreakpoint && breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)) {
+                set_pc(instr_begin);
+            } else if (stop_reason.trap_type == TrapType::HardwareBreakpoint) {
+                auto id = get_lastest_hardward_stoppoint_id();
+                if (id.index() == 1) {
+                    watchpoints_.get_by_id(std::get<1>(id)).update_data();
+                }
+            }
         }
+            
     }
 
     return stop_reason;
@@ -375,8 +382,24 @@ int zdb::Process::set_hardware_breakpoint(VirtualAddr address, StopPointMode mod
     return free_dr_index;
 }
 
+std::variant<zdb::BreakpointSite::id_type, zdb::Watchpoint::id_type> 
+zdb::Process::get_lastest_hardward_stoppoint_id() const {
+    using RetTy = std::variant<zdb::BreakpointSite::id_type, zdb::Watchpoint::id_type>;
+    const Registers &regs = get_registers();
+    std::uint64_t data_of_dr6 = regs.read_by_id_as<std::uint64_t>(RegisterId::dr6);
+    int dr_index = __builtin_ctzll(data_of_dr6);
+    int dr_reg_index = static_cast<int>(RegisterId::dr0) + dr_index;
+    VirtualAddr addr_in_dr(regs.read_by_id_as<std::uint64_t>(static_cast<RegisterId>(dr_reg_index)));
+    if (breakpoint_sites_.contains_address(addr_in_dr)) {
+        const BreakpointSite &bp = breakpoint_sites_.get_by_address(addr_in_dr);
+        return RetTy{ std::in_place_index<0>, bp.id()};
+    } else {
+        const Watchpoint &wp = watchpoints_.get_by_address(addr_in_dr);
+        return RetTy{ std::in_place_index<1>, wp.id()};
+    }
+}
 
-void zdb::Process::clear_hardware_breakpoint(int id) {
+void zdb::Process::clear_hardware_stoppoint(int id) {
     auto &regs = get_registers();
     auto dr_id = static_cast<int>(RegisterId::dr0) + id;
     auto reg_dr_id = static_cast<RegisterId>(dr_id);

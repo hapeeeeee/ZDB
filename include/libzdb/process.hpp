@@ -79,7 +79,8 @@ namespace zdb {
         const StoppointCollection<Watchpoint>& watchpoints() const { return watchpoints_; }
         int set_watchpoint(Watchpoint::id_type id, VirtualAddr address, StopPointMode mode, std::size_t size);
 
-        void clear_hardware_breakpoint(int id);
+        std::variant<BreakpointSite::id_type, Watchpoint::id_type> get_lastest_hardward_stoppoint_id() const;
+        void clear_hardware_stoppoint(int id);
 
         template<class T>
         T read_memory_as(VirtualAddr addr) {

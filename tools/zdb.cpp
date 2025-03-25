@@ -80,6 +80,32 @@ namespace {
         // unreacheable
         zdb::Error::send("Invalid format");
     }
+    //555555555000 
+    // func addr 11c9
+    std::string get_sigtrap_info(const zdb::Process& process, zdb::StopReason reason) {
+        if (reason.trap_type == zdb::TrapType::SoftwareBreakpoint) {
+            auto& site = process.breakpoint_sites().get_by_address(process.get_pc());
+            return fmt::format(" (breakpoint {})", site.id());
+        } else if (reason.trap_type == zdb::TrapType::HardwareBreakpoint) {
+            auto id = process.get_lastest_hardward_stoppoint_id();
+            if (id.index() == 0) {
+                return fmt::format(" (breakpoint {})",  std::get<0>(id));
+            }
+
+            std::string msg = "";
+            auto &wp = process.watchpoints().get_by_id(std::get<1>(id));
+            msg += fmt::format(" (watchpoint {})", wp.id());
+            if (wp.data() == wp.previous_data()) {
+                msg += fmt::format("\nValue: {:#x}", wp.data());
+            } else {
+                msg += fmt::format("\nOld value: {:#x}\nNew value: {:#x}", wp.previous_data(), wp.data());
+            }
+            return msg;
+        } else if (reason.trap_type == zdb::TrapType::SignalStep) {
+            return " (single step)";
+        }
+        return "";
+    }
 
     void print_stop_reason(const zdb::Process &process, zdb::StopReason &stop_reason) {
         std::string message;
@@ -96,6 +122,9 @@ namespace {
                 sigabbrev_np(stop_reason.info), 
                 process.get_pc().addr()
             );
+            if (stop_reason.info == SIGTRAP) {
+                message += get_sigtrap_info(process, stop_reason);
+            }
             break;
         }
         fmt::print("Process {} {}\n", process.pid(), message);
@@ -128,8 +157,7 @@ namespace {
             std::cerr << R"(Available commands:
             read <address>
             read <address> <number of bytes>
-            write <address> <bytes>
-            )";
+            write <address> <bytes>)" << std::endl;
         } else if (is_prefix(args[1], "disassemble")) {
             std::cerr << R"(Available options:
             -c <number of instructions>
@@ -141,8 +169,7 @@ namespace {
             delete <id>
             disable <id>
             enable <id>
-            set <address> <write|rw|execute> <size>
-            )";
+            set <address> <write|rw|execute> <size>)" << std::endl;
         }else {
             std::cerr << "No help available on that\n";
         }
