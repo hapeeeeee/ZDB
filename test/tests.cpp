@@ -394,3 +394,31 @@ TEST_CASE("Hardware breakpoint evades memory checksums", "[breakpoint]") {
     proc->wait_on_signal();
     REQUIRE(to_string_view(channel.read()) == "Putting pineapple on pizza...\n");
 }
+
+TEST_CASE("Watchpoint detects read access", "[watchpoint]") {
+    bool close_on_exec = false;
+    zdb::Pipe channel(close_on_exec);
+    auto proc = Process::launch("bin/anti_debugger", true, channel.get_write());
+    channel.close_write();
+
+    proc->resume();
+    proc->wait_on_signal();
+    std::vector<std::byte> str_of_func_addr = channel.read();
+    VirtualAddr func_addr = VirtualAddr(from_bytes_as<std::uint64_t>(str_of_func_addr.data()));
+    auto &wp = proc->create_watchpoint(func_addr, StopPointMode::ReadWrite, 1);
+    wp.enable();
+    
+    proc->resume();
+    proc->wait_on_signal();   // halt on watchpoint before read function code on address
+    proc->step();             // step to read function code on address
+    auto &bp = proc->create_breakpoint_site(func_addr, false, false);
+    bp.enable();
+    
+    proc->resume();
+    auto reason = proc->wait_on_signal();  // halt on breakpoint before execute function code
+    REQUIRE(reason.info == SIGTRAP);
+    proc->resume();
+    proc->wait_on_signal();
+    REQUIRE(to_string_view(channel.read()) == "Putting pineapple on pizza...\n");
+}
+

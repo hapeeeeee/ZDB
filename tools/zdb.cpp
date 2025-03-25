@@ -7,7 +7,6 @@
 #include <fmt/ranges.h>
 #include <libzdb/parse.hpp>
 #include <libzdb/disassembler.hpp>
-
 namespace {
     std::unique_ptr<zdb::Process> attach(int argc, const char **argv) {
         // Passing PID
@@ -530,4 +529,6 @@ int main(int argc, const char **argv) {
     } catch (const zdb::Error &err) {
         std::cout << err.what() << '\n';
     }
+
+   
 }

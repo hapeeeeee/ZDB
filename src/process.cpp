@@ -173,7 +173,7 @@ void zdb::Process::resume() {
 }
 
 zdb::StopReason zdb::Process::step() {
-    std::optional<BreakpointSite*> to_reenable{nullptr};
+    std::optional<BreakpointSite*> to_reenable;
     auto pc = get_pc();
     if (breakpoint_sites_.enabled_stoppoint_at_address(pc)) {
         auto &bp = breakpoint_sites_.get_by_address(pc);
