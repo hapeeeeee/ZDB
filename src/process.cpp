@@ -187,6 +187,19 @@ void zdb::Process::resume() {
     state_ = ProcessState::Running;
 }
 
+zdb::StopReason zdb::Process::resume_from_untrack_syscall(const StopReason &reason) {
+    if (syscall_catch_policy_.get_mode() == SyscallCatchPolicy::CatchMode::Some) {
+        const std::vector<int> &to_catch = syscall_catch_policy_.get_to_catch();
+        auto found = std::find(to_catch.begin(), to_catch.end(), reason.syscall_info->syscall_id);
+        if (found == end(to_catch)) {
+            resume();
+            return wait_on_signal();
+        }
+    }
+
+    return reason;
+}
+
 zdb::StopReason zdb::Process::step() {
     std::optional<BreakpointSite*> to_reenable;
     auto pc = get_pc();
@@ -236,6 +249,9 @@ zdb::StopReason zdb::Process::wait_on_signal() {
         if (id.index() == 1) {
             watchpoints_.get_by_id(std::get<1>(id)).update_data();
         }
+    }
+    else if (stop_reason.trap_type == TrapType::Syscall) {
+        stop_reason = resume_from_untrack_syscall(stop_reason);
     }
     return stop_reason;
 }

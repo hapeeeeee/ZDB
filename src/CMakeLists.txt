@@ -1,4 +1,4 @@
-add_library(libzdb process.cpp pipe.cpp registers.cpp breakpoint_site.cpp disassembler.cpp watchpoint.cpp)
+add_library(libzdb process.cpp pipe.cpp registers.cpp breakpoint_site.cpp disassembler.cpp watchpoint.cpp syscall.cpp)
 target_link_libraries(libzdb PRIVATE Zydis::Zydis)
 add_library(zdb::libzdb ALIAS libzdb)
 

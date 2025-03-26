@@ -95,6 +95,7 @@ namespace zdb {
           std::optional<int> stdout_fd = std::nullopt
         );
         void resume();
+        StopReason resume_from_untrack_syscall(const StopReason &reason);
         StopReason step();
         StopReason wait_on_signal();
         void augment_trap_type(StopReason &reason);
