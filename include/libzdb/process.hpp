@@ -25,8 +25,24 @@ namespace zdb {
     enum class TrapType {
       Unknown,
       SignalStep,
+      Syscall,
       SoftwareBreakpoint,
       HardwareBreakpoint,
+    };
+
+
+   
+    struct SyscallInfo {
+      // If we request a `PTRACE_SYSCALL` in `prace(PTRACE_SYSCALL, ..)`, 
+      // the inferior will halt twice for each syscall: once on entry and once on exit. 
+      // This enables the tracer to check the arguments to the syscall before it’s executed 
+      // and then check the return value on exit.
+      std::uint16_t syscall_id;
+      bool is_in_syscall;
+      union {
+        std::array<std::uint64_t, 6> args;
+        std::uint64_t retval;
+      };
     };
 
     struct StopReason {
@@ -34,8 +50,36 @@ namespace zdb {
         ProcessState reason;
         std::uint8_t info;
         std::optional<TrapType> trap_type;
+        std::optional<SyscallInfo> syscall_info; // only valid if trap_type is TrapType::Syscall
     };
 
+    class SyscallCatchPolicy {
+      public:
+        enum CatchMode {None, Some, All};
+
+        static SyscallCatchPolicy catch_none() {
+          return SyscallCatchPolicy(CatchMode::None, {});
+        }
+
+        static SyscallCatchPolicy catch_some(std::vector<int> to_catch) {
+          return SyscallCatchPolicy(CatchMode::Some, std::move(to_catch));
+        }
+
+        static SyscallCatchPolicy catch_all() {
+          return SyscallCatchPolicy(CatchMode::All, {});
+        }
+
+        CatchMode get_mode() const { return mode_; }
+        const std::vector<int>& get_to_catch() const { return to_catch_; }
+
+      private:
+        SyscallCatchPolicy(CatchMode mode, std::vector<int> to_catch)
+        : mode_(mode), to_catch_(std::move(to_catch)) {}
+
+        CatchMode mode_ = CatchMode::None;
+        std::vector<int> to_catch_;
+
+    };
     class Process {
       public:
         Process()                = delete;
@@ -54,7 +98,6 @@ namespace zdb {
         StopReason step();
         StopReason wait_on_signal();
         void augment_trap_type(StopReason &reason);
-        
 
         void write_user_area(std::size_t offset, std::uint64_t data);
         void write_fprs(const user_fpregs_struct& fprs);
@@ -91,23 +134,24 @@ namespace zdb {
         std::vector<std::byte> read_memory_without_trap(VirtualAddr addr, std::size_t amount) const;
         void write_memory(VirtualAddr address, Span<const std::byte> data);
 
+        void set_syscall_catch_policy(SyscallCatchPolicy policy) { syscall_catch_policy_ = std::move(policy); }
 
       private:
         pid_t pid_             = 0;
         bool terminate_on_end_ = true;
         bool is_attached_      = true;
+        bool expecting_syscall_exit_ = false;
         ProcessState state_    = ProcessState::Stopped;
         std::unique_ptr<Registers> registers_;
         StoppointCollection<BreakpointSite> breakpoint_sites_;
         StoppointCollection<Watchpoint> watchpoints_;
-
+        SyscallCatchPolicy syscall_catch_policy_ = SyscallCatchPolicy::catch_none();
       private:
         Process(pid_t pid, bool terminate_on_end, bool is_attached)
             : pid_(pid), terminate_on_end_(terminate_on_end), is_attached_(is_attached),
               registers_(new Registers(*this)) {}
         
         void read_all_registers();
-        
     };
 } // namespace zdb
 

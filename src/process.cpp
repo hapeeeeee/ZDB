@@ -6,6 +6,12 @@
 #include <libzdb/bit.hpp>
 
 namespace {
+    void set_ptrace_options(pid_t pid) {
+        if (ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD) < 0) {
+            zdb::Error::send_errno("Set ptrace options failed");
+        }
+    }
+
     void exit_with_perror(zdb::Pipe &pipe, const std::string &prefix) {
         std::string msg = prefix + ": " + std::strerror(errno);
         pipe.write(reinterpret_cast<std::byte *>(msg.data()), msg.size());
@@ -93,6 +99,7 @@ std::unique_ptr<zdb::Process> zdb::Process::attach(pid_t pid) {
 
     std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/false, /*is_attached=*/true));
     proc->wait_on_signal();
+    set_ptrace_options(pid);
     return proc;
 }
 
@@ -149,6 +156,7 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(
         // This state change triggers a signal in the child process,
         // allowing `waitpid` to return without blocking.
         proc->wait_on_signal();
+        set_ptrace_options(pid);
     }
     return proc;
 }
@@ -168,8 +176,12 @@ void zdb::Process::resume() {
         }
         bp.enable();
     } 
-    
-    if (ptrace(PTRACE_CONT, pid_, nullptr, nullptr) < 0) {
+
+    auto ptrace_req = 
+        syscall_catch_policy_.get_mode() == SyscallCatchPolicy::CatchMode::None ?
+            PTRACE_CONT : 
+            PTRACE_SYSCALL;
+    if (ptrace(ptrace_req, pid_, nullptr, nullptr) < 0) {
         Error::send_errno("Continue failed");
     }
     state_ = ProcessState::Running;
@@ -200,26 +212,31 @@ zdb::StopReason zdb::Process::wait_on_signal() {
     if (waitpid(pid_, &wait_status, 0) < 0) {
         Error::send_errno("Wait signal failed");
     }
+
     StopReason stop_reason(wait_status);
     state_ = stop_reason.reason;
-
-    if (is_attached_ && state_ == ProcessState::Stopped) {
-        read_all_registers();
-        augment_trap_type(stop_reason);
-        auto instr_begin = get_pc() - 1;
-        if (stop_reason.info == SIGTRAP) {
-            if (stop_reason.trap_type == TrapType::SoftwareBreakpoint && breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)) {
-                set_pc(instr_begin);
-            } else if (stop_reason.trap_type == TrapType::HardwareBreakpoint) {
-                auto id = get_lastest_hardward_stoppoint_id();
-                if (id.index() == 1) {
-                    watchpoints_.get_by_id(std::get<1>(id)).update_data();
-                }
-            }
-        }
-            
+    if (!is_attached_ || state_ != ProcessState::Stopped) {
+        return stop_reason;
     }
 
+    read_all_registers();
+    augment_trap_type(stop_reason);
+    if (stop_reason.info != SIGTRAP) {
+        return stop_reason;
+    }
+
+    auto instr_begin = get_pc() - 1;
+    if (stop_reason.trap_type == TrapType::SoftwareBreakpoint 
+        && breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)
+    ) {
+        set_pc(instr_begin);
+    } 
+    else if (stop_reason.trap_type == TrapType::HardwareBreakpoint) {
+        auto id = get_lastest_hardward_stoppoint_id();
+        if (id.index() == 1) {
+            watchpoints_.get_by_id(std::get<1>(id)).update_data();
+        }
+    }
     return stop_reason;
 }
 
@@ -228,6 +245,44 @@ void zdb::Process::augment_trap_type(StopReason &reason) {
     if (ptrace(PTRACE_GETSIGINFO, pid_, nullptr, &info) < 0) {
         Error::send_errno("Get signal info failed");
     }
+
+    // Now that we’ve enabled `PTRACE_O_TRACESYSGOOD` option, 
+    // the signal number will have its eighth bit set if the SIGTRAP came from a syscall. 
+    // This means we can use signal ==  to check whether we’re trapped by a syscall. 
+    if (reason.info == (SIGTRAP | 0x80)) {
+        auto &syscall_info = reason.syscall_info.emplace();
+        auto &regs = get_registers();
+
+        if (expecting_syscall_exit_) {
+            syscall_info.is_in_syscall = false;
+            expecting_syscall_exit_ = false;
+
+            syscall_info.syscall_id = regs.read_by_id_as<std::uint64_t>(RegisterId::orig_rax);
+            syscall_info.retval = regs.read_by_id_as<std::int64_t>(RegisterId::rax);
+        } else {
+            syscall_info.is_in_syscall = true;
+            expecting_syscall_exit_ = true;
+
+            syscall_info.syscall_id = regs.read_by_id_as<std::uint64_t>(RegisterId::orig_rax);
+            std::array<RegisterId, 6> arg_regs = {
+                RegisterId::rdi, 
+                RegisterId::rsi, 
+                RegisterId::rdx,
+                RegisterId::r10, 
+                RegisterId::r8, 
+                RegisterId::r9
+            };
+            for (auto i = 0; i < 6; ++i) {
+                syscall_info.args[i] = regs.read_by_id_as<std::uint64_t>(arg_regs[i]);
+            }
+        }
+
+        reason.trap_type = TrapType::Syscall;
+        reason.info = SIGTRAP;
+        return;
+    }
+
+    expecting_syscall_exit_ = false;
     reason.trap_type = TrapType::Unknown;
     if (info.si_signo == SIGTRAP) {
         switch (info.si_code) {
