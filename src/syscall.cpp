@@ -18,7 +18,6 @@ namespace zdb {
             #undef DEFINE_SYSCALL
         default: Error::send("No such syscall");
         }
-            
     }
 
     int syscall_name_to_id(std::string_view name) {

@@ -7,6 +7,8 @@
 #include <fmt/ranges.h>
 #include <libzdb/parse.hpp>
 #include <libzdb/disassembler.hpp>
+#include <libzdb/syscall.hpp>
+#include <cctype>
 
 namespace {
     zdb::Process *g_zdb_process = nullptr;
@@ -80,8 +82,7 @@ namespace {
         // unreacheable
         zdb::Error::send("Invalid format");
     }
-    //555555555000 
-    // func addr 11c9
+
     std::string get_sigtrap_info(const zdb::Process& process, zdb::StopReason reason) {
         if (reason.trap_type == zdb::TrapType::SoftwareBreakpoint) {
             auto& site = process.breakpoint_sites().get_by_address(process.get_pc());
@@ -103,6 +104,24 @@ namespace {
             return msg;
         } else if (reason.trap_type == zdb::TrapType::SignalStep) {
             return " (single step)";
+        } else if (reason.trap_type == zdb::TrapType::Syscall) {
+            std::string msg = "";
+            zdb::SyscallInfo &info = reason.syscall_info.value();
+            if (info.is_in_syscall) {
+                msg += fmt::format(" (syscall entry)\n");
+                msg += fmt::format(
+                    "(syscall: {} ({:#x}))", 
+                    zdb::syscall_id_to_name(info.syscall_id),
+                    fmt::join(info.args, ",")
+                );
+            } else {
+                msg += fmt::format(" (syscall exit)\n");
+                msg += fmt::format(" (syscall: {} ({:#x}))", 
+                    zdb::syscall_id_to_name(info.syscall_id),
+                    info.retval
+                );
+            }
+            return msg;
         }
         return "";
     }
@@ -136,6 +155,7 @@ namespace {
                 disassemble - Disassemble machine code to assembly
                 breakpoint  - Commands for operating on breakpoints
                 watchpoint  - Commands for operating on watchpoints
+                catchpoint  - Commands for operating on catchpoints
                 continue    - Resume the process
                 register    - Commands for operating on registers
                 memory      - Commands for operating on memory
@@ -170,7 +190,12 @@ namespace {
             disable <id>
             enable <id>
             set <address> <write|rw|execute> <size>)" << std::endl;
-        }else {
+        } else if (is_prefix(args[1], "catchpoint")) {
+            std::cerr << R"(Available commands:
+            syscall
+            syscall none
+            syscall <list of syscall IDs or names>)" << std::endl;
+        } else {
             std::cerr << "No help available on that\n";
         }
     }
@@ -493,6 +518,41 @@ namespace {
         }
     }
 
+    void handle_catchpoint_syscall_command(zdb::Process &process, const std::vector<std::string> &args) {
+        zdb::SyscallCatchPolicy policy = zdb::SyscallCatchPolicy::catch_all();
+        if (args.size() == 3 && args[2] == "none") {
+            policy = zdb::SyscallCatchPolicy::catch_none();
+        } else if (args.size() >= 3) {
+            std::vector<std::string> name_or_id_of_syscalls = split(args[2], ',');
+            std::vector<int> to_catch_ids;
+            std::transform(
+                name_or_id_of_syscalls.begin(), 
+                name_or_id_of_syscalls.end(),
+                std::back_inserter(to_catch_ids),
+                [](auto &syscall) {
+                    return std::isdigit(syscall[0])?
+                        zdb::to_integral<int>(syscall, 10).value():
+                        zdb::syscall_name_to_id(syscall);
+                }
+            );
+            policy = zdb::SyscallCatchPolicy::catch_some(std::move(to_catch_ids));
+        }
+        process.set_syscall_catch_policy(std::move(policy));
+    }
+
+    void handle_catchpoint_command(zdb::Process &process, const std::vector<std::string> &args) {
+        zdb::SyscallCatchPolicy policy = zdb::SyscallCatchPolicy::catch_all();
+        if (args.size() < 2) { 
+            print_help({"help", "catchpoint"});
+            return;
+        }
+
+        if (is_prefix(args[1], "syscall")) {
+            handle_catchpoint_syscall_command(process, args);
+            return;
+        }
+    }
+
     void handle_stop(zdb::Process &process, zdb::StopReason &stop_reason) {
         print_stop_reason(process, stop_reason);
         if (stop_reason.reason == zdb::ProcessState::Stopped) {
@@ -523,6 +583,8 @@ namespace {
             handle_disassemble_command(*process, args);
         } else if (is_prefix(command, "watchpoint")) {
             handle_watchpoint_command(*process, args);
+        } else if (is_prefix(command, "catchpoint")) {
+            handle_catchpoint_command(*process, args);
         } else {
             std::cerr << "Unknown command\n";
         }

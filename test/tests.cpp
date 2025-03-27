@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <regex>
 #include <elf.h>
+#include <libzdb/syscall.hpp>
+#include <fcntl.h>
 
 using namespace zdb;
 
@@ -30,8 +32,9 @@ namespace {
 } // namespace
 
 namespace {
-    /// 由于可执行程序编译时指定了`-pie`, 所以可执行程序的磁盘文件的加载地址和实际偏移不同，
-    /// 所以需要计算可执行程序的代码段被加载时的误差
+    /// 由于可执行程序编译时指定了`-pie`, 所以可执行程序的磁盘文件的加载地址和运行时内存中的实际偏移不同，
+    /// 我们通过 `personality(ADDR_NO_RANDOMIZE)` 来禁止地址随机化，
+    /// 另外仍然需要计算可执行程序的代码段被加载时的误差
     /// 计算方式是：代码段的加载误差 = 代码段的加载地址 - 代码段在磁盘文件中的实际偏移 (get_section_load_bias)
     /// 然后计算：  入口指令的磁盘实际偏移 = 入口指令的磁盘地址 - 代码段的加载误差 (get_entry_point_offset)
     /// 由于我们的调试器在launch子程序时设置了`personality(ADDR_NO_RANDOMIZE)`,
@@ -422,3 +425,41 @@ TEST_CASE("Watchpoint detects read access", "[watchpoint]") {
     REQUIRE(to_string_view(channel.read()) == "Putting pineapple on pizza...\n");
 }
 
+TEST_CASE("Syscall map works", "[syscall]") {
+    REQUIRE(zdb::syscall_name_to_id("read") == 0);
+    REQUIRE(zdb::syscall_name_to_id("write") == 1);
+    REQUIRE(zdb::syscall_name_to_id("open") == 2);
+    REQUIRE(zdb::syscall_name_to_id("close") == 3);
+
+    REQUIRE(zdb::syscall_id_to_name(0) == "read");
+    REQUIRE(zdb::syscall_id_to_name(1) == "write");
+    REQUIRE(zdb::syscall_id_to_name(2) == "open");
+    REQUIRE(zdb::syscall_id_to_name(3) == "close");
+}
+
+TEST_CASE("Catchpoint works", "[catchpoint]") {
+    int fd = open("/dev/null", O_WRONLY);
+    std::unique_ptr<zdb::Process> proc = Process::launch("./bin/anti_debugger", true, fd);
+    
+    int syscall_write_id = syscall_name_to_id("write");
+    SyscallCatchPolicy policy = SyscallCatchPolicy::catch_some({syscall_write_id});
+    proc->set_syscall_catch_policy(policy);
+
+    proc->resume();
+    StopReason reason = proc->wait_on_signal();
+    REQUIRE(reason.reason == zdb::ProcessState::Stopped);
+    REQUIRE(reason.info == SIGTRAP);
+    REQUIRE(reason.trap_type == zdb::TrapType::Syscall);
+    REQUIRE(reason.syscall_info->syscall_id == syscall_write_id);
+    REQUIRE(reason.syscall_info->is_in_syscall == true);
+    
+    proc->resume();
+    reason = proc->wait_on_signal();
+    REQUIRE(reason.reason == zdb::ProcessState::Stopped);
+    REQUIRE(reason.info == SIGTRAP);
+    REQUIRE(reason.trap_type == zdb::TrapType::Syscall);
+    REQUIRE(reason.syscall_info->syscall_id == syscall_write_id);
+    REQUIRE(reason.syscall_info->is_in_syscall == false);
+    close(fd);
+    
+}

@@ -274,7 +274,7 @@ void zdb::Process::augment_trap_type(StopReason &reason) {
             expecting_syscall_exit_ = false;
 
             syscall_info.syscall_id = regs.read_by_id_as<std::uint64_t>(RegisterId::orig_rax);
-            syscall_info.retval = regs.read_by_id_as<std::int64_t>(RegisterId::rax);
+            syscall_info.retval = regs.read_by_id_as<std::uint64_t>(RegisterId::rax);
         } else {
             syscall_info.is_in_syscall = true;
             expecting_syscall_exit_ = true;
