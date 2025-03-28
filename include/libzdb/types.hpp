@@ -10,11 +10,20 @@ namespace zdb {
     using byte64 = std::array<std::byte, 8>;
     using byte128 = std::array<std::byte, 16>;
 
+
+    // consider three different kinds of addresses: 
+    // absolute offsets from the start of the object file (corresponding to the `zdb::FileOffset` type),
+    // virtual addresses specified in the ELF file (corresponding to the `zdb::FileAddr` type), 
+    // the actual virtual addresses in the executing program (corresponding to the `zdb::VirtAddr` type).
+    class FileAddr;
+    class ELF;
     class VirtualAddr {
         public:
             VirtualAddr() = default;
             explicit VirtualAddr(uint64_t addr) : addr_(addr) {}
             std::uint64_t addr() const { return addr_; }
+
+            FileAddr to_file_addr(const ELF& elf) const;
             
             VirtualAddr operator+(std::int64_t offset) const {
                 return VirtualAddr(addr_ + offset);
