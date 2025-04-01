@@ -6,25 +6,25 @@
 #include <sys/mman.h>
 #include <libzdb/bit.hpp>
 #include <cxxabi.h>
-
+#include <iostream>
 namespace zdb {
     ELF::ELF(const std::filesystem::path &path): path_(path) {
-        if (fd_ = open(path.c_str(), O_RDONLY) < 0) {
+        if ((fd_ = open(path.c_str(), O_RDONLY)) < 0) {
             Error::send_errno("open file failed");
         }
 
-        struct stat file_stat;
-        if (fstat(fd_, &file_stat) < 0) {
-            close(fd_);
-            Error::send_errno("open file failed");
+        struct stat stats;
+        if (fstat(fd_, &stats) < 0) {
+            Error::send_errno("Could not retrieve ELF file stats");
         }
-        file_size_ = file_stat.st_size;
+        file_size_ = stats.st_size;
 
         void* ret;
         if ((ret = mmap(0, file_size_, PROT_READ, MAP_SHARED, fd_, 0)) == MAP_FAILED) {
             close(fd_);
             Error::send_errno("mmap file failed");
         }
+
 
         data_ = reinterpret_cast<std::byte*>(ret);
         std::copy(data_, data_ + sizeof(elf_header_), as_bytes<Elf64_Ehdr>(elf_header_));
@@ -228,8 +228,8 @@ namespace zdb {
             // Add an entry to the address map that maps the symbol’s address range to a pointer to the symbol.
             if (
                 symbol.st_value != 0 
-                && symbol.st_name !=0 
-                && ELF64_ST_TYPE(symbol.st_info) == STT_TLS
+                && symbol.st_name != 0 
+                && ELF64_ST_TYPE(symbol.st_info) != STT_TLS
             ) {
                 auto range = std::make_pair(
                     FileAddr{*this, symbol.st_value},

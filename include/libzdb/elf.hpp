@@ -117,7 +117,7 @@ class ELF {
         std::filesystem::path path() const { return path_; }
         const Elf64_Ehdr& get_elf_header() { return elf_header_; };
         VirtualAddr load_bias() const { return load_bias_;}
-        void set_load_bias(VirtualAddr addr) { load_bias_ = addr; };
+        void notify_loaded(VirtualAddr addr) { load_bias_ = addr; };
 
         const std::vector<Elf64_Shdr>& get_section_headers() { return section_headers_; }
 

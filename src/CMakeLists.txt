@@ -8,6 +8,7 @@ add_library(libzdb
     syscall.cpp
     elf.cpp
     types.cpp
+    target.cpp
 )
 target_link_libraries(libzdb PRIVATE Zydis::Zydis)
 add_library(zdb::libzdb ALIAS libzdb)

@@ -9,7 +9,8 @@
 #include <libzdb/disassembler.hpp>
 #include <libzdb/syscall.hpp>
 #include <cctype>
-
+#include <libzdb/target.hpp>
+#include <libzdb/elf.hpp>
 namespace {
     zdb::Process *g_zdb_process = nullptr;
     void handle_sigint(int) {
@@ -19,17 +20,17 @@ namespace {
 
 
 namespace {
-    std::unique_ptr<zdb::Process> attach(int argc, const char **argv) {
+    std::unique_ptr<zdb::Target> attach(int argc, const char **argv) {
         // Passing PID
         if (argc == 3 && argv[1] == std::string_view("-p")) {
             pid_t pid = std::atoi(argv[2]);
-            return zdb::Process::attach(pid);
+            return zdb::Target::attach(pid);
         }
         // Passing program name
         else {
             const char *program_path = argv[1];
-            auto proc = zdb::Process::launch(program_path);
-            fmt::print("Process {} launched\n", proc->pid());
+            auto proc = zdb::Target::launch(program_path);
+            fmt::print("Process {} launched\n", proc->get_process().pid());
             return proc;
         }
     }
@@ -126,7 +127,34 @@ namespace {
         return "";
     }
 
-    void print_stop_reason(const zdb::Process &process, zdb::StopReason &stop_reason) {
+    std::string get_signal_stop_reason(const zdb::Target &target, zdb::StopReason &stop_reason) {
+        auto& process = target.get_process();
+
+        std::string message = fmt::format(
+            "stopped with signal {} at {:#x}", 
+            sigabbrev_np(stop_reason.info), 
+            process.get_pc().addr()
+        );
+
+        auto func = target
+            .get_elf()
+            .get_symbol_containing_virt_addr(process.get_pc());
+        
+        if (func && ELF64_ST_TYPE(func.value()->st_info) == STT_FUNC) {
+            message += fmt::format(
+                " ({})", 
+                target.get_elf().get_general_str_from_strtab(func.value()->st_name)
+            );
+        }
+
+        if (stop_reason.info == SIGTRAP) {
+            message += get_sigtrap_info(process, stop_reason);
+        }
+
+        return message;
+    }
+
+    void print_stop_reason(const zdb::Target &target, zdb::StopReason &stop_reason) {
         std::string message;
         switch (stop_reason.reason) {
         case zdb::ProcessState::Terminated:
@@ -136,17 +164,10 @@ namespace {
             message = fmt::format("exited with status {}", static_cast<int>(stop_reason.info));
             break;
         case zdb::ProcessState::Stopped:
-            message = fmt::format(
-                "stopped with signal {} at {:#x}", 
-                sigabbrev_np(stop_reason.info), 
-                process.get_pc().addr()
-            );
-            if (stop_reason.info == SIGTRAP) {
-                message += get_sigtrap_info(process, stop_reason);
-            }
+            message = get_signal_stop_reason(target, stop_reason);
             break;
         }
-        fmt::print("Process {} {}\n", process.pid(), message);
+        fmt::print("Process {} {}\n", target.get_process().pid(), message);
     }
 
     void print_help(const std::vector<std::string> &args) {
@@ -553,21 +574,26 @@ namespace {
         }
     }
 
-    void handle_stop(zdb::Process &process, zdb::StopReason &stop_reason) {
-        print_stop_reason(process, stop_reason);
+    void handle_stop(zdb::Target &target, zdb::StopReason &stop_reason) {
+        print_stop_reason(target, stop_reason);
         if (stop_reason.reason == zdb::ProcessState::Stopped) {
-            print_disassembly(process, process.get_pc(), 5);
+            print_disassembly(
+                target.get_process(), 
+                target.get_process().get_pc(), 
+                5
+            );
         }
     }
 
     /// @brief  disassemble -c <count> -a <address>
-    void handle_command(std::unique_ptr<zdb::Process> &process, std::string_view line) {
+    void handle_command(std::unique_ptr<zdb::Target> &target, std::string_view line) {
+        auto process = &target->get_process();
         auto args    = split(line, ' ');
         auto command = args[0];
         if (is_prefix(command, "continue")) {
             process->resume();
             zdb::StopReason stop_reason = process->wait_on_signal();
-            handle_stop(*process, stop_reason);
+            handle_stop(*target, stop_reason);
         } else if (is_prefix(command, "help")) {
             print_help(args);
         } else if (is_prefix(command, "register")) {
@@ -576,7 +602,7 @@ namespace {
             handle_breakpoint_command(*process, args);
         } else if (is_prefix(command, "step")) {
             auto stop_reason = process->step();
-            handle_stop(*process, stop_reason);
+            handle_stop(*target, stop_reason);
         } else if (is_prefix(command, "memory")) {
             handle_memory_command(*process, args);
         } else if (is_prefix(command, "disassemble")) {
@@ -590,7 +616,7 @@ namespace {
         }
     }
 
-    void main_loop(std::unique_ptr<zdb::Process> &proc) {
+    void main_loop(std::unique_ptr<zdb::Target> &target) {
         char *line = nullptr;
         while ((line = readline("zdb> ")) != nullptr) {
             std::string line_string;
@@ -606,7 +632,7 @@ namespace {
 
             if (!line_string.empty()) {
                 try {
-                    handle_command(proc, line_string);
+                    handle_command(target, line_string);
                 } catch (zdb::Error &e) {
                     std::cerr << "Error: " << e.what() << std::endl;
                 }
@@ -622,13 +648,11 @@ int main(int argc, const char **argv) {
     }
 
     try {
-        auto process = attach(argc, argv);
-        g_zdb_process = process.get();
+        auto target = attach(argc, argv);
+        g_zdb_process = &(target->get_process());
         signal(SIGINT, handle_sigint);
-        main_loop(process);
+        main_loop(target);
     } catch (const zdb::Error &err) {
         std::cout << err.what() << '\n';
     }
-
-   
 }

@@ -94,6 +94,7 @@ namespace zdb {
           bool debug = true,
           std::optional<int> stdout_fd = std::nullopt
         );
+        std::unordered_map<int, std::uint64_t> get_auxv() const;
         void resume();
         StopReason resume_from_untrack_syscall(const StopReason &reason);
         StopReason step();

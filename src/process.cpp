@@ -4,7 +4,8 @@
 #include <sys/personality.h>
 #include <sys/uio.h>
 #include <libzdb/bit.hpp>
-
+#include <fstream>
+#include <elf.h>
 namespace {
     void set_ptrace_options(pid_t pid) {
         if (ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD) < 0) {
@@ -159,6 +160,23 @@ std::unique_ptr<zdb::Process> zdb::Process::launch(
         set_ptrace_options(pid);
     }
     return proc;
+}
+
+std::unordered_map<int, std::uint64_t> zdb::Process::get_auxv() const {
+    auto path = "/proc/" + std::to_string(pid_) + "/auxv";
+    std::ifstream auxv_file(path);
+
+    std::unordered_map<int, std::uint64_t> auxv;
+    std::uint64_t id_key, value;
+    auto read_auxv = [&](auto &into) {
+        auxv_file.read(reinterpret_cast<char *>(&into), sizeof(into));
+    };
+
+    for (read_auxv(id_key); id_key != AT_NULL; read_auxv(id_key)) {
+        read_auxv(value);
+        auxv[id_key] = value;
+    }
+    return auxv;
 }
 
 void zdb::Process::resume() {
