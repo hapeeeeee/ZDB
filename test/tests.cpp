@@ -11,6 +11,8 @@
 #include <elf.h>
 #include <libzdb/syscall.hpp>
 #include <fcntl.h>
+#include <libzdb/target.hpp>
+#include <libzdb/elf.hpp>
 
 using namespace zdb;
 
@@ -461,5 +463,24 @@ TEST_CASE("Catchpoint works", "[catchpoint]") {
     REQUIRE(reason.syscall_info->syscall_id == syscall_write_id);
     REQUIRE(reason.syscall_info->is_in_syscall == false);
     close(fd);
-    
+}
+
+TEST_CASE("ELF parser works", "[elf]") {
+    zdb::ELF elf("bin/hello_zdb");
+    auto entry_virtual_addr_in_mem = elf.get_elf_header().e_entry;
+    auto entry_file_addr =  FileAddr(elf, entry_virtual_addr_in_mem);
+    auto symbol_from_file_addr = elf.get_symbol_at_file_addr(entry_file_addr);
+    auto name = elf.get_general_str_from_strtab(symbol_from_file_addr.value()->st_name);
+    REQUIRE(name == "_start");
+
+    auto names = elf.get_symbols_by_name("_start");
+    REQUIRE(names.size() == 1);
+    name = elf.get_general_str_from_strtab(names[0]->st_name);
+    REQUIRE(name == "_start");
+
+    elf.notify_loaded(VirtualAddr{ 0xcafecafe });
+    auto sym = elf.get_symbol_at_virt_addr(VirtualAddr{ 0xcafecafe + entry_virtual_addr_in_mem });
+    name = elf.get_general_str_from_strtab(sym.value()->st_name);
+    REQUIRE(name == "_start");
+
 }

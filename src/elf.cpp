@@ -239,8 +239,8 @@ namespace zdb {
             }
         }
     }
-
     std::string_view ELF::get_general_str_from_strtab(std::size_t index) const {
+
         // Although most ELF files have a general string table, 
         // in some cases they may allocate different string tables to different sections.
         // The more robust way to handle string tables is to read 
