@@ -1,13 +1,13 @@
 function(add_test_cpp_executable name)
     add_executable(${name} ${name}.cpp)
-    target_compile_options(${name} PRIVATE -g -O0 -pie)
+    target_compile_options(${name} PRIVATE -g -gdwarf-4 -O0 -pie)
     add_dependencies(tests ${name})
 endfunction()
 
 function(add_test_asm_executable name)
     add_executable(${name} ${name}.s)
     target_compile_options(${name} PRIVATE -pie)
-    add_dependencies(tests ${name})
+    add_dependencies(tests ${name}
 endfunction()
 
 add_test_cpp_executable(run_endlessly)

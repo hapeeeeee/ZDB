@@ -1,17 +1,255 @@
 #ifndef LIBZDB_DWARF_HPP
 #define LIBZDB_DWARF_HPP
 
+#include <cstdint>
+#include <libzdb/types.hpp>
+#include <libzdb/bit.hpp>
+#include <string_view>
+#include <algorithm>
+#include <vector>
+#include <memory>
 #include <libzdb/detail/dwarf.h>
 
+namespace {
+    // `Cursor` type is to help us parse forms from various locations.
+    // This cursor type will point to a location in the DWARF information,
+    // allowing us to easily access information from that location. 
+    // As a result, if we wanted to parse a ULEB128, a 64-bit integer, and then a string, we could
+    // do something like the following:
+    // ```cxx
+    //  auto the_uleb = cur.uleb128();
+    //  auto the_int = cur.u64();
+    //  auto the_string = cur.string();
+    // ```
+    // The cursor will handle the parsing of the data and advance the location
+    // being pointed to. Only the DWARF parser’s code will use this cursor type,
+    // so we’ll make it private to the Dwarf class.
+    class Cursor {
+      public:
+        explicit Cursor(zdb::Span<const std::byte> data)
+          : data_(data), pos_(data.begin()) {}
+        
+        
+        Cursor& operator++() { ++pos_; return *this; }
+        Cursor operator+=(std::size_t n) { pos_ += n; return *this; }
+        const std::byte& operator*() const { return *pos_; }
+        bool is_finished() const { return pos_ >= data_.end(); }
+        const std::byte* position() { return pos_; }
+
+        void skip_form(std::uint64_t form) {
+          switch (form) {
+          case DW_FORM_flag_present:
+          break;
+          case DW_FORM_data1:
+          case DW_FORM_ref1:
+          case DW_FORM_flag:
+            pos_ += 1; 
+            break;
+          case DW_FORM_data2:
+          case DW_FORM_ref2:
+            pos_ += 2; 
+            break;
+          case DW_FORM_data4:
+          case DW_FORM_ref4:
+          case DW_FORM_ref_addr:
+          case DW_FORM_sec_offset:
+          case DW_FORM_strp:
+            pos_ += 4; break;
+          case DW_FORM_data8:
+          case DW_FORM_addr:
+            pos_ += 8; break;
+
+          default: zdb::Error::send("Unrecognized DWARF form");
+          }
+        }
+
+        template<class T>
+        T fixed_int() {
+          auto result = zdb::from_bytes_as<T>(pos_);
+          pos_ += sizeof(T);
+          return result;
+        }
+
+        template<class T>
+        T u64() {
+          auto result = zdb::from_bytes_as<T>(pos_);
+          pos_ += sizeof(T);
+          return result;
+        }
+
+        std::uint8_t u8() { return fixed_int<std::uint8_t>(); }
+        std::uint16_t u16() { return fixed_int<std::uint16_t>(); }
+        std::uint32_t u32() { return fixed_int<std::uint32_t>(); }
+        std::uint64_t u64() { return fixed_int<std::uint64_t>(); }
+        std::int8_t s8() { return fixed_int<std::int8_t>(); }
+        std::int16_t s16() { return fixed_int<std::int16_t>(); }
+        std::int32_t s32() { return fixed_int<std::int32_t>(); }
+        std::int64_t s64() { return fixed_int<std::int64_t>(); }
+
+        std::string_view string() {
+            auto null_terminator = std::find(pos_, data_.end(), std::byte{0});
+            std::string_view ret(reinterpret_cast<const char*>(pos_), null_terminator - pos_);
+            pos_ = null_terminator + 1;
+            return ret;
+        }
+
+        std::uint64_t uleb128() {
+            std::uint64_t result = 0;
+            std::uint64_t shift = 0;
+            std::uint8_t byte;
+            do {
+                byte = u8();
+                std::uint64_t value = static_cast<std::uint64_t>(byte & 0x7f);
+                result |= value << shift;
+                shift += 7;
+            } while (byte & 0x80);
+
+            return result;  
+        }
+
+        std::int64_t sleb128() {
+            std::uint64_t result = 0;
+            std::uint64_t shift = 0;
+            std::uint8_t byte;
+            do {
+                byte = u8();
+                std::uint64_t value = static_cast<std::uint64_t>(byte & 0x7f);
+                result |= value << shift;
+                shift += 7;
+            } while (byte & 0x80);
+
+            if (byte & 0x40 && shift < 64) {
+                result |= (~static_cast<std::uint64_t>(0) << shift);
+            }
+
+            return static_cast<std::int64_t>(result);  
+        }
+        
+      private:
+        zdb::Span<const std::byte> data_;
+        const std::byte *pos_;
+    };
+}
+
 namespace zdb {
+    class DIE;
+    class CompileUnit;
     class ELF;
+    class Dwarf;
+
+/**
+ * .debug_info 
+ *
+ * CompileUnit(CU) Structure：
+ *
+ * ┌───────────────────────────────┐
+ * │ header                        │
+ * │ ├── cu_size                   │  // size
+ * │ ├── cu_version                │  // DWARF version
+ * │ ├── cu_abbrev_id              │  // Abbrev table entry ID
+ * │ ├── addr_size                 │  // address size(8 for x64)
+ * ├───────────────────────────────┤
+ * │ data                          │
+ * │ ├── abbrev_id1                │  
+ * │ │   ├── attr1                 │  
+ * │ │   ├── attr2                 │  
+ * │ ├── abbrev_id2                │  
+ * │ │   ├── attr1                 │  
+ * │ ├── abbrev_id=0 (null DIE3)   │  
+ * └───────────────────────────────┘
+ *
+ *  More than one DIE（Debugging Information Entry exists in a compile unit.
+ */
+    class DIE {
+      public:
+        explicit DIE(const std::byte* next): next_(next) {} // Only for null DIE, Abbrev is 0
+
+        DIE(
+          const std::byte* pos, 
+          const CompileUnit* cu, 
+          const Abbrev* abbrev,
+          std::vector<const std::byte*> attr_locs, 
+          const std::byte* next
+        ) : pos_(pos), cu_(cu), abbrev_offset_(abbrev), attr_locs_(std::move(attr_locs)), next_(next) {}
+        
+        const CompileUnit* cu() const { return cu_; }
+        const Abbrev* abbrev_entry() const { return abbrev_offset_; }
+        const std::byte* position() const { return pos_; }
+        const std::byte* next() const { return next_; }
+
+      private:
+        const std::byte* pos_ = nullptr;
+        const CompileUnit* cu_ = nullptr;       ///< A pointer to the compile unit to which it belongs
+        const Abbrev* abbrev_offset_ = nullptr; ///< A pointer to its abbreviation table entry
+        const std::byte* next_ = nullptr;       ///< A pointer to the DIE immediately after this one, 
+                                                ///< whether it be a child or a brother
+        std::vector<const std::byte*> attr_locs_;
+    };
+
+    // `.debug_info` section is split into information for each compile unit involved in the compilation of the program.
+    // Every compile unit begins with a compile unit header, 
+    // which describes four important characteristics of that unit:
+    //    A 4-byte unsigned integer representing the byte size of the information 
+    //      for this compile unit (excluding this field itself, but including the rest of the header)
+    // 
+    //    A 2-byte unsigned integer representing the DWARF version 
+    //      for this compile unit information (four, in our case)
+    // 
+    //    A 4-byte unsigned integer representing the offset into the `.debug_abbrev`
+    //      section at which the abbreviation table for this compile unit begins;
+    // 
+    //    A 1-byte unsigned integer representing the byte size of an address
+    //      on the system (eight, in our case)
+    class CompileUnit {
+      public:
+        CompileUnit(
+          Dwarf &dwarf, 
+          Span<const std::byte> data, 
+          std::size_t abbrev_offset
+        ) : parent_(&dwarf), data_(data), abbrev_offset_(abbrev_offset) {}
+
+        const Dwarf* dwarf_info() const { return parent_; }
+        Span<const std::byte> data() const { return data_; }
+
+        const std::unordered_map<std::uint64_t, Abbrev>& abbrev_table() const;
+
+        DIE root() const;
+
+      private:
+        Dwarf* parent_;
+        Span<const std::byte> data_;
+        std::size_t abbrev_offset_;
+    };
+
+    // Each Abbreviation entry structure:
+    //  ULEB128 : `abbreviation code` to reference the table, if 0, end of table
+    //  ULEB128 : `tag` for `DW_TAG_*`, found in `detail/dwarf.h`
+    //  bool    : whether the DIE has child DIEs
+    //  (ULEB128, ULEB128)* : list of attribute specifications, ends with (0, 0)
+    struct AttrSpec {
+      std::uint64_t attr;
+      std::uint64_t form;
+    };
+    struct Abbrev {
+      std::uint64_t code;
+      std::uint64_t tag;
+      bool has_children;
+      std::vector<AttrSpec> attr_specs;
+    };
+
     class Dwarf {
       public:
         Dwarf(const ELF &parent);
-        const ELF* elf() const { return _elf; }
+        const ELF* elf() const { return elf_; }
+
+        const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);
+        const std::vector<std::unique_ptr<CompileUnit>> &compile_units() const { return compile_units_; }
 
       private:
-        const ELF *_elf;
+        const ELF *elf_;
+
+        std::unordered_map<std::size_t, std::unordered_map<std::uint64_t, Abbrev>> abbrev_tables_;
+        std::vector<std::unique_ptr<CompileUnit>> compile_units_;
     };
 }
 
