@@ -9,7 +9,8 @@
 #include <vector>
 #include <memory>
 #include <libzdb/detail/dwarf.h>
-
+#include <optional>
+#include <libzdb/error.hpp>
 namespace {
     // `Cursor` type is to help us parse forms from various locations.
     // This cursor type will point to a location in the DWARF information,
@@ -153,6 +154,22 @@ namespace zdb {
     class CompileUnit;
     class ELF;
     class Dwarf;
+    
+    // Each Abbreviation entry structure:
+    //  ULEB128 : `abbreviation code` to reference the table, if 0, end of table
+    //  ULEB128 : `tag` for `DW_TAG_*`, found in `detail/dwarf.h`
+    //  bool    : whether the DIE has child DIEs
+    //  (ULEB128, ULEB128)* : list of attribute specifications, ends with (0, 0)
+    struct AttrSpec {
+      std::uint64_t attr;
+      std::uint64_t form;
+    };
+    struct Abbrev {
+      std::uint64_t code;
+      std::uint64_t tag;
+      bool has_children;
+      std::vector<AttrSpec> attr_specs;
+    };
 
 /**
  * .debug_info 
@@ -207,38 +224,38 @@ namespace zdb {
         std::vector<const std::byte*> attr_locs_;
     };
     class DIE::ChildrenRange {
-    public:
-      ChildrenRange(DIE DIE) : die_(std::move(DIE)) {}
-      class iterator {
-        public:
-          using value_type = DIE;
-          using reference = const DIE&;
-          using pointer = const DIE*;
-          using difference_type = std::ptrdiff_t;
-          using iterator_category = std::forward_iterator_tag;
-          
-          iterator() = default;
-          iterator(const iterator&) = default;
-          iterator& operator=(const iterator&) = default;
-          explicit iterator(const DIE& die);
-          const DIE& operator*() const { return *op_die_; }
-          const DIE* operator->() const { return &op_die_.value(); }
-          iterator& operator++();
-          iterator operator++(int);
-          bool operator==(const iterator& rhs) const;
-          bool operator!=(const iterator& rhs) const { return !(*this == rhs); }
+      public:
+        ChildrenRange(DIE DIE) : die_(std::move(DIE)) {}
+        class iterator {
+          public:
+            using value_type = DIE;
+            using reference = const DIE&;
+            using pointer = const DIE*;
+            using difference_type = std::ptrdiff_t;
+            using iterator_category = std::forward_iterator_tag;
+            
+            iterator() = default;
+            iterator(const iterator&) = default;
+            iterator& operator=(const iterator&) = default;
+            explicit iterator(const DIE& die);
+            const DIE& operator*() const { return *op_die_; }
+            const DIE* operator->() const { return &op_die_.value(); }
+            iterator& operator++();
+            iterator operator++(int);
+            bool operator==(const iterator& rhs) const;
+            bool operator!=(const iterator& rhs) const { return !(*this == rhs); }
 
-        private:
-          std::optional<DIE> op_die_;
-      };
+          private:
+            std::optional<DIE> op_die_;
+        };
 
-      iterator begin() const {
-        if (die_.abbrev_->has_children) {
-          return iterator{ die_ };
+        iterator begin() const {
+          if (die_.abbrev_->has_children) {
+            return iterator{ die_ };
+          }
+          return end();
         }
-        return end();
-      }
-      iterator end() const { return iterator{}; }
+        iterator end() const { return iterator{}; }
       private:
         DIE die_;
     };
@@ -292,21 +309,6 @@ namespace zdb {
         std::size_t abbrev_offset_;
     };
 
-    // Each Abbreviation entry structure:
-    //  ULEB128 : `abbreviation code` to reference the table, if 0, end of table
-    //  ULEB128 : `tag` for `DW_TAG_*`, found in `detail/dwarf.h`
-    //  bool    : whether the DIE has child DIEs
-    //  (ULEB128, ULEB128)* : list of attribute specifications, ends with (0, 0)
-    struct AttrSpec {
-      std::uint64_t attr;
-      std::uint64_t form;
-    };
-    struct Abbrev {
-      std::uint64_t code;
-      std::uint64_t tag;
-      bool has_children;
-      std::vector<AttrSpec> attr_specs;
-    };
 
     class Dwarf {
       public:

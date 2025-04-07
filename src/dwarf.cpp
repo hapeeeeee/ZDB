@@ -118,42 +118,48 @@ namespace {
     }
 }
 
+// For Die::ChangeRange
 namespace zdb {
     DIE::ChildrenRange::iterator::iterator(const zdb::DIE& d) {
         Cursor next_cur({ d.next_, d.cu_->data().end() });
         op_die_ = parse_die(*d.cu_, next_cur);
     }
-}
 
-bool zdb::DIE::ChildrenRange::iterator::operator==(const iterator& rhs) const {
-    auto lhs_null = !op_die_.has_value() || !op_die_->abbrev_entry();
-    auto rhs_null = !rhs.op_die_.has_value() || !rhs.op_die_->abbrev_entry();
-    if (lhs_null && rhs_null) return true;
-    if (lhs_null || rhs_null) return false;
-    return op_die_->abbrev_ == rhs.op_die_->abbrev_ && op_die_->next() == rhs.op_die_->next();
-}
-
-zdb::DIE::ChildrenRange::iterator&
-zdb::DIE::ChildrenRange::iterator::operator++() {
-    if (!op_die_.has_value() || !op_die_->abbrev_entry()) return *this;
-    if (!op_die_->abbrev_entry()->has_children) {
-        Cursor next_cur({ op_die_->next_, op_die_->cu_->data().end() });
-        op_die_ = parse_die(*op_die_->cu_, next_cur);
-    } else {
-        iterator sub_children(*die_);
-        while (sub_children->abbrev_) ++sub_children;
-        Cursor next_cur({ sub_children->next_, die_->cu_->data().end() });
-        op_die_ = parse_die(*die_->cu_, next_cur);
+    bool DIE::ChildrenRange::iterator::operator==(const iterator& rhs) const {
+        auto lhs_null = !op_die_.has_value() || !op_die_->abbrev_entry();
+        auto rhs_null = !rhs.op_die_.has_value() || !rhs.op_die_->abbrev_entry();
+        if (lhs_null && rhs_null) return true;
+        if (lhs_null || rhs_null) return false;
+        return op_die_->abbrev_ == rhs.op_die_->abbrev_ && op_die_->next() == rhs.op_die_->next();
     }
-    return *this;
+
+    DIE::ChildrenRange::iterator& DIE::ChildrenRange::iterator::operator++() {
+        if (!op_die_.has_value() || !op_die_->abbrev_entry()) return *this;
+        if (!op_die_->abbrev_entry()->has_children) {
+            Cursor next_cur({ op_die_->next_, op_die_->cu_->data().end() });
+            op_die_ = parse_die(*op_die_->cu_, next_cur);
+        } else {
+            iterator sub_children(*op_die_);
+            while (sub_children->abbrev_) ++sub_children;
+            Cursor next_cur({ sub_children->next_, op_die_->cu_->data().end() });
+            op_die_ = parse_die(*op_die_->cu_, next_cur);
+        }
+        return *this;
+    }
+
+    DIE::ChildrenRange::iterator DIE::ChildrenRange::iterator::operator++(int) {
+        auto tmp = *this;
+        ++(*this);
+        return tmp;
+    }
+
+    DIE::ChildrenRange DIE::children() const {
+        return ChildrenRange(*this);
+    }
 }
 
-zdb::DIE::ChildrenRange::iterator
-zdb::DIE::ChildrenRange::iterator::operator++(int) {
-    auto tmp = *this;
-    ++(*this);
-    return tmp;
-}
+
+
 
 namespace zdb {
     Dwarf::Dwarf(const ELF &parent) : elf_(&parent) {
