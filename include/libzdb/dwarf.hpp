@@ -39,16 +39,14 @@ namespace {
         void skip_form(std::uint64_t form) {
           switch (form) {
           case DW_FORM_flag_present:
-          break;
+            break;
           case DW_FORM_data1:
           case DW_FORM_ref1:
           case DW_FORM_flag:
-            pos_ += 1; 
-            break;
+            pos_ += 1; break;
           case DW_FORM_data2:
           case DW_FORM_ref2:
-            pos_ += 2; 
-            break;
+            pos_ += 2; break;
           case DW_FORM_data4:
           case DW_FORM_ref4:
           case DW_FORM_ref_addr:
@@ -58,7 +56,26 @@ namespace {
           case DW_FORM_data8:
           case DW_FORM_addr:
             pos_ += 8; break;
-
+          case DW_FORM_sdata:
+            sleb128(); break;
+          case DW_FORM_udata:
+          case DW_FORM_ref_udata:
+            uleb128(); break;
+          case DW_FORM_block1:
+            pos_ += u8(); break;
+          case DW_FORM_block2:
+            pos_ += u16(); break;
+          case DW_FORM_block4:
+            pos_ += u32(); break;
+          case DW_FORM_block:
+          case DW_FORM_exprloc:
+            pos_ += uleb128(); break;
+          case DW_FORM_string:
+            while (!is_finished() && *pos_ != std::byte(0)) { ++pos_; }
+            ++pos_;
+            break;
+          case DW_FORM_indirect:
+            skip_form(uleb128()); break;
           default: zdb::Error::send("Unrecognized DWARF form");
           }
         }
@@ -150,17 +167,21 @@ namespace zdb {
  * │ ├── addr_size                 │  // address size(8 for x64)
  * ├───────────────────────────────┤
  * │ data                          │
- * │ ├── abbrev_id1                │  
+ * │ ├── abbrev_id1(DIE1)          │  
  * │ │   ├── attr1                 │  
  * │ │   ├── attr2                 │  
- * │ ├── abbrev_id2                │  
+ * │ ├── abbrev_id2(DIE2)          │  
  * │ │   ├── attr1                 │  
  * │ ├── abbrev_id=0 (null DIE3)   │  
  * └───────────────────────────────┘
  *
- *  More than one DIE（Debugging Information Entry exists in a compile unit.
+ *  More than one DIE(Debugging Information Entry) exists in a compile unit.
  */
     class DIE {
+      public:
+        class ChildrenRange;
+        ChildrenRange children() const;
+
       public:
         explicit DIE(const std::byte* next): next_(next) {} // Only for null DIE, Abbrev is 0
 
@@ -170,21 +191,71 @@ namespace zdb {
           const Abbrev* abbrev,
           std::vector<const std::byte*> attr_locs, 
           const std::byte* next
-        ) : pos_(pos), cu_(cu), abbrev_offset_(abbrev), attr_locs_(std::move(attr_locs)), next_(next) {}
+        ) : pos_(pos), cu_(cu), abbrev_(abbrev), attr_locs_(std::move(attr_locs)), next_(next) {}
         
         const CompileUnit* cu() const { return cu_; }
-        const Abbrev* abbrev_entry() const { return abbrev_offset_; }
+        const Abbrev* abbrev_entry() const { return abbrev_; }
         const std::byte* position() const { return pos_; }
         const std::byte* next() const { return next_; }
 
       private:
         const std::byte* pos_ = nullptr;
         const CompileUnit* cu_ = nullptr;       ///< A pointer to the compile unit to which it belongs
-        const Abbrev* abbrev_offset_ = nullptr; ///< A pointer to its abbreviation table entry
+        const Abbrev* abbrev_ = nullptr;        ///< Abbreviation data in table entry
         const std::byte* next_ = nullptr;       ///< A pointer to the DIE immediately after this one, 
                                                 ///< whether it be a child or a brother
         std::vector<const std::byte*> attr_locs_;
     };
+    class DIE::ChildrenRange {
+    public:
+      ChildrenRange(DIE DIE) : die_(std::move(DIE)) {}
+      class iterator {
+        public:
+          using value_type = DIE;
+          using reference = const DIE&;
+          using pointer = const DIE*;
+          using difference_type = std::ptrdiff_t;
+          using iterator_category = std::forward_iterator_tag;
+          
+          iterator() = default;
+          iterator(const iterator&) = default;
+          iterator& operator=(const iterator&) = default;
+          explicit iterator(const DIE& die);
+          const DIE& operator*() const { return *op_die_; }
+          const DIE* operator->() const { return &op_die_.value(); }
+          iterator& operator++();
+          iterator operator++(int);
+          bool operator==(const iterator& rhs) const;
+          bool operator!=(const iterator& rhs) const { return !(*this == rhs); }
+
+        private:
+          std::optional<DIE> op_die_;
+      };
+
+      iterator begin() const {
+        if (die_.abbrev_->has_children) {
+          return iterator{ die_ };
+        }
+        return end();
+      }
+      iterator end() const { return iterator{}; }
+      private:
+        DIE die_;
+    };
+
+    
+
+    // We won’t worry about making the range type conform to the expectations of C++20 ranges, 
+    // and will instead err on the side of simplicity. The zdb::DIE::children_range type will wrap a DIE 
+    // and provide begin and end member functions that we can call to retrieve iterators to the children. 
+    // This will allow us to write code like the following:
+    // ```
+    //  for (auto child : my_die.children()) {
+    //    do_something(child);
+    //  }
+    // ```
+
+    
 
     // `.debug_info` section is split into information for each compile unit involved in the compilation of the program.
     // Every compile unit begins with a compile unit header, 

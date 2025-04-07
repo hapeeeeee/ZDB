@@ -179,7 +179,7 @@ enum {
     DW_DEFAULTED_out_of_class = 0x02,
 };
 
-enum {
+enum AttrTagInAbbrevEntry {
     DW_FORM_addr = 0x01,
     DW_FORM_block2 = 0x03,
     DW_FORM_block4 = 0x04,

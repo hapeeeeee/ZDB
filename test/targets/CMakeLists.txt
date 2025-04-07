@@ -7,7 +7,7 @@ endfunction()
 function(add_test_asm_executable name)
     add_executable(${name} ${name}.s)
     target_compile_options(${name} PRIVATE -pie)
-    add_dependencies(tests ${name}
+    add_dependencies(tests ${name})
 endfunction()
 
 add_test_cpp_executable(run_endlessly)
