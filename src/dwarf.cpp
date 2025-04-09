@@ -118,7 +118,128 @@ namespace {
     }
 }
 
-// For Die::ChangeRange
+// For Attr 
+namespace zdb {
+    FileAddr Attr::as_address() const {
+        Cursor cur({ location_, cu_->data().end() });
+        if (form_ != DW_FORM_addr) Error::send("Invalid address type");
+        auto elf = cu_->dwarf_info()->elf();
+        return FileAddr{ *elf, cur.u64() };
+
+    }
+
+    std::uint32_t Attr::as_section_offset() const {
+        Cursor cur({ location_, cu_->data().end() });
+        if (form_ != DW_FORM_sec_offset) Error::send("Invalid offset type");
+        return cur.u32();
+    }
+
+    Span<const std::byte> Attr::as_block() const {
+        std::size_t size;
+        Cursor cur({ location_, cu_->data().end() });
+
+        switch (form_) {
+        case DW_FORM_block1:
+            size = cur.u8();
+            break;
+        case DW_FORM_block2:
+            size = cur.u16();
+            break;
+        case DW_FORM_block4:
+            size = cur.u32();
+            break;
+        case DW_FORM_block:
+            size = cur.uleb128();
+            break;
+        default:
+            Error::send("Invalid block type");
+        }
+        return { cur.position(), size };
+    }
+
+    std::uint64_t Attr::as_int() const {
+        Cursor cur({ location_, cu_->data().end() });
+        switch (form_) {
+        case DW_FORM_data1:
+            return cur.u8();
+        case DW_FORM_data2:
+            return cur.u16();
+        case DW_FORM_data4:
+            return cur.u32();
+        case DW_FORM_data8:
+            return cur.u64();
+        case DW_FORM_udata:
+            return cur.uleb128();
+        default:
+            Error::send("Invalid integer type");
+        }
+    }
+
+    std::string_view Attr::as_string() const {
+        Cursor cur({ location_, cu_->data().end() });
+        switch (form_) {
+        case DW_FORM_string:
+            return cur.string(); 
+        case DW_FORM_strp: {
+            auto offset = cur.u32();
+            auto stab = cu_
+                ->dwarf_info()
+                ->elf()
+                ->get_section_contents_by_name(".debug_str");
+            Cursor stab_cur({ stab.begin() + offset, stab.end() });
+            return stab_cur.string(); 
+        }
+        default:
+            Error::send("Invalid string type");
+        }
+    }
+
+    DIE Attr::as_reference() const {
+        Cursor cur({ location_, cu_->data().end() });
+        std::size_t offset;
+        switch (form_) {
+        case DW_FORM_ref1:
+            offset = cur.u8(); break;
+        case DW_FORM_ref2:
+            offset = cur.u16(); break;
+        case DW_FORM_ref4:
+            offset = cur.u32(); break;
+        case DW_FORM_ref8:
+            offset = cur.u64(); break;
+        case DW_FORM_ref_udata:
+            offset = cur.uleb128(); break;
+        case DW_FORM_ref_addr: {
+            // `DW_FORM_ref_addr` form can reference data in other compile units, 
+            // so its offset is relative to the start of the `.debug_info` section. 
+            offset = cur.u32();
+            Span<const std::byte> section = cu_
+                ->dwarf_info()
+                ->elf()
+                ->get_section_contents_by_name(".debug_info");
+            auto die_pos = section.begin() + offset;
+
+            auto& cus = cu_->dwarf_info()->compile_units();
+            auto cu_finder = [=](auto& cu) {
+                return cu->data().begin() <= die_pos and cu->data().end() > die_pos;
+            };
+            auto cu_for_die_pos = std::find_if(
+                begin(cus), 
+                end(cus), 
+                cu_finder
+            );
+            Cursor ref_cur({ die_pos, cu_for_die_pos->get()->data().end() });
+            return parse_die(**cu_for_die_pos, ref_cur);
+        }
+        default:
+            Error::send("Invalid reference type");
+        }
+
+        Cursor ref_cur({ cu_->data().begin() + offset, cu_->data().end() });
+        return parse_die(*cu_, ref_cur);
+    }
+}
+
+// For DIE::ChangeRange
 namespace zdb {
     DIE::ChildrenRange::iterator::iterator(const zdb::DIE& d) {
         Cursor next_cur({ d.next_, d.cu_->data().end() });
@@ -135,9 +256,12 @@ namespace zdb {
 
     DIE::ChildrenRange::iterator& DIE::ChildrenRange::iterator::operator++() {
         if (!op_die_.has_value() || !op_die_->abbrev_entry()) return *this;
+
         if (!op_die_->abbrev_entry()->has_children) {
             Cursor next_cur({ op_die_->next_, op_die_->cu_->data().end() });
             op_die_ = parse_die(*op_die_->cu_, next_cur);
+        } else if (op_die_->contains(DW_AT_sibling)) {
+            op_die_ = op_die_.value()[DW_AT_sibling].as_reference();
         } else {
             iterator sub_children(*op_die_);
             while (sub_children->abbrev_) ++sub_children;
@@ -158,8 +282,57 @@ namespace zdb {
     }
 }
 
+// For DIE
+namespace zdb {
+    bool DIE::contains(std::uint64_t attribute) const {
+        auto& specs = abbrev_->attr_specs;
+        return std::find_if(
+                specs.begin(), 
+                specs.end(),
+                [=](auto spec) { 
+                    return spec.attr == attribute; 
+                }
+            ) != end(specs);
+    }
 
+    Attr DIE::operator[](std::uint64_t attribute) const {
+        auto& specs = abbrev_->attr_specs;
+        for (std::size_t i = 0; i < specs.size(); ++i) {
+            if (specs[i].attr == attribute) {
+                return { cu_, specs[i].attr, specs[i].form, attr_locs_[i] };
+            }
+        }
+        Error::send("Attribute not found");
+    }
 
+    FileAddr DIE::low_pc() const {
+        return (*this)[DW_AT_low_pc].as_address();
+    }
+
+    FileAddr DIE::high_pc() const {
+        Attr attr = (*this)[DW_AT_high_pc];
+        FileAddr addr;
+        if (attr.form() == DW_FORM_addr) {
+            addr = attr.as_address();
+        } else {
+            addr = low_pc() + attr.as_int();
+        }
+        return addr;
+    }
+}
+
+// For RangeList
+namespace zdb {
+    RangeList::iterator::iterator(
+        const CompileUnit* cu, 
+        Span<const std::byte> data, 
+        FileAddr base_address
+    ) : cu_(cu), data_(data), base_address_(base_address), pos_(data.begin()) 
+    {
+        ++(*this);
+    }
+
+}
 
 namespace zdb {
     Dwarf::Dwarf(const ELF &parent) : elf_(&parent) {
@@ -168,8 +341,8 @@ namespace zdb {
 
     const std::unordered_map<std::uint64_t, Abbrev> &Dwarf::get_abbrev_table(std::size_t offset) {
         if (!abbrev_tables_.count(offset)) {
-        }
             abbrev_tables_.insert({offset, parse_abbrev_table(*elf_, offset)});
+        }
         return abbrev_tables_.at(offset);
     }
 

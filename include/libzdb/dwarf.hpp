@@ -88,13 +88,6 @@ namespace {
           return result;
         }
 
-        template<class T>
-        T u64() {
-          auto result = zdb::from_bytes_as<T>(pos_);
-          pos_ += sizeof(T);
-          return result;
-        }
-
         std::uint8_t u8() { return fixed_int<std::uint8_t>(); }
         std::uint16_t u16() { return fixed_int<std::uint16_t>(); }
         std::uint32_t u32() { return fixed_int<std::uint32_t>(); }
@@ -154,16 +147,58 @@ namespace zdb {
     class CompileUnit;
     class ELF;
     class Dwarf;
+
+// ----------------------------------- For Abbrev & DIE -------------------------------------------------- //
+    class Attr {
+      public:
+        Attr(const CompileUnit* cu, std::uint64_t type, std::uint64_t form, const std::byte* location) 
+        : cu_(cu), type_(type), form_(form), location_(location) {}
+      
+        std::uint64_t name() const { return type_; }
+        std::uint64_t form() const { return form_; }
+
+        FileAddr as_address() const;
+        std::uint32_t as_section_offset() const;
+        Span<const std::byte> as_block() const;
+        std::uint64_t as_int() const;
+        std::string_view as_string() const;
+        DIE as_reference() const;
+        
+      private:
+        const CompileUnit* cu_;
+        std::uint64_t type_;
+        std::uint64_t form_;
+        const std::byte* location_;
+    };
+    
+    // DWARF Attribute Components Overview:
+    //
+    // When parsing a DIE (Debugging Information Entry), each attribute is defined
+    // by three separate components, coming from different sources:
+    //
+    // | Component   | Source        | Meaning                                                 |
+    // |-------------|---------------|---------------------------------------------------------|
+    // | attr        | Abbrev table  | The attribute type (e.g., DW_AT_name, DW_AT_type)       |
+    // | form        | Abbrev table  | How the attribute value is encoded (e.g., DW_FORM_strp) |
+    // | value       | .debug_info   | The actual attribute data, interpreted using `form`     |
+    //
+    // - `attr` specifies what the attribute represents (e.g., name, type, location).
+    // - `form` specifies how to decode the value from the binary stream.
+    // - The value itself is stored in the .debug_info section, and is parsed
+    //   based on the attribute's form defined in the abbreviation.
+    //
+    // The abbreviation table serves as a schema for interpreting the attribute values.
+
+    struct AttrSpec {
+      std::uint64_t attr;
+      std::uint64_t form;
+    };
     
     // Each Abbreviation entry structure:
     //  ULEB128 : `abbreviation code` to reference the table, if 0, end of table
     //  ULEB128 : `tag` for `DW_TAG_*`, found in `detail/dwarf.h`
     //  bool    : whether the DIE has child DIEs
     //  (ULEB128, ULEB128)* : list of attribute specifications, ends with (0, 0)
-    struct AttrSpec {
-      std::uint64_t attr;
-      std::uint64_t form;
-    };
     struct Abbrev {
       std::uint64_t code;
       std::uint64_t tag;
@@ -215,6 +250,14 @@ namespace zdb {
         const std::byte* position() const { return pos_; }
         const std::byte* next() const { return next_; }
 
+        bool contains(std::uint64_t attribute) const;
+        Attr operator[](std::uint64_t attribute) const;
+
+        FileAddr low_pc() const;
+        FileAddr high_pc() const;
+
+
+
       private:
         const std::byte* pos_ = nullptr;
         const CompileUnit* cu_ = nullptr;       ///< A pointer to the compile unit to which it belongs
@@ -260,7 +303,61 @@ namespace zdb {
         DIE die_;
     };
 
-    
+// ----------------------------------- For `.debug_range` Section ----------------------------------------- //
+  class RangeList {
+    public:
+      RangeList(const CompileUnit* cu, Span<const std::byte> data, FileAddr base_address)
+      : cu_(cu), data_(data), base_address_(base_address) {}
+      struct Entry {
+        FileAddr low;
+        FileAddr high;
+
+        bool contains(FileAddr addr) const {
+          return low <= addr and addr < high;
+        }
+      };
+
+      class iterator;
+      iterator begin() const;
+      iterator end() const;
+      bool contains(FileAddr address) const;
+
+    private:
+      const CompileUnit* cu_;
+      Span<const std::byte> data_;
+      FileAddr base_address_;
+  };
+
+  class RangeList::iterator {
+    public:
+      using value_type = Entry;
+      using reference = const Entry&;
+      using pointer = const Entry*;
+      using difference_type = std::ptrdiff_t;
+      using iterator_category = std::forward_iterator_tag;
+
+      iterator(const CompileUnit* cu, Span<const std::byte> data, FileAddr base_address);
+      iterator() = default;
+      iterator(const iterator&) = default;
+
+      iterator& operator=(const iterator&) = default;
+      const Entry& operator*() const { return current_; }
+      const Entry* operator->() const { return &current_; }
+      bool operator==(iterator rhs) const { return pos_ == rhs.pos_; }
+      bool operator!=(iterator rhs) const { return pos_ != rhs.pos_; }
+      iterator& operator++();
+      iterator operator++(int);
+
+    private:
+      const CompileUnit* cu_ = nullptr;
+      Span<const std::byte> data_{ nullptr,nullptr };
+      FileAddr base_address_;
+      const std::byte* pos_ = nullptr;
+      Entry current_;
+  };
+
+
+// ----------------------------------- For `.debug_info` Section ------------------------------------------ //
 
     // We won’t worry about making the range type conform to the expectations of C++20 ranges, 
     // and will instead err on the side of simplicity. The zdb::DIE::children_range type will wrap a DIE 
