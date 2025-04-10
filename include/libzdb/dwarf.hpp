@@ -11,6 +11,8 @@
 #include <libzdb/detail/dwarf.h>
 #include <optional>
 #include <libzdb/error.hpp>
+#include <string>
+
 namespace {
     // `Cursor` type is to help us parse forms from various locations.
     // This cursor type will point to a location in the DWARF information,
@@ -147,6 +149,7 @@ namespace zdb {
     class CompileUnit;
     class ELF;
     class Dwarf;
+    class RangeList;
 
 // ----------------------------------- For Abbrev & DIE -------------------------------------------------- //
     class Attr {
@@ -163,6 +166,7 @@ namespace zdb {
         std::uint64_t as_int() const;
         std::string_view as_string() const;
         DIE as_reference() const;
+        RangeList as_range_list() const;
         
       private:
         const CompileUnit* cu_;
@@ -255,6 +259,8 @@ namespace zdb {
 
         FileAddr low_pc() const;
         FileAddr high_pc() const;
+        bool contains_file_address(FileAddr address) const;
+
 
 
 
@@ -304,6 +310,22 @@ namespace zdb {
     };
 
 // ----------------------------------- For `.debug_range` Section ----------------------------------------- //
+  // The `.debug_range` section consists of a series of entries of three possible kinds.
+  // All range list entries consistof two integers with a byte size identical the address size of the machine (8 bytes, on x64).
+  // 
+  // 1. `base address selectors`; 
+  //  - An integer with all bits set, which indicates that this entry is a base address selector
+  //  - An integer that sets the base address from which all future range list entries should be considered 
+  //      an offset (until the base address is changed again or the list ends)
+  // 
+  // 2. `Regular entries selectors`, which change how we should interpret regular entries; 
+  //  - A beginning address offset relative to the current base address
+  //  - An ending address offset relative to the current base `base address selectors`
+  // Note: If no base address selector entry precedes the current one, the base address 
+  //  gets encoded as the `DW_AT_low_pc` attribute in the DIE that is referencing the range list. 
+  //  Such a DIE will have a `DW_AT_low_pc` attribute, but not a matching `DW_AT_high_pc` attribute.
+  //
+  // 3. An `end-of-list indicator` has both integers set to 0.
   class RangeList {
     public:
       RangeList(const CompileUnit* cu, Span<const std::byte> data, FileAddr base_address)
@@ -313,7 +335,7 @@ namespace zdb {
         FileAddr high;
 
         bool contains(FileAddr addr) const {
-          return low <= addr and addr < high;
+          return low <= addr && addr < high;
         }
       };
 
@@ -412,8 +434,22 @@ namespace zdb {
         Dwarf(const ELF &parent);
         const ELF* elf() const { return elf_; }
 
+        const CompileUnit* compile_unit_containing_address(FileAddr address) const;
+        std::optional<DIE> function_containing_address(FileAddr address) const;
+        std::vector<DIE> find_functions(std::string name) const;
+
         const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);
         const std::vector<std::unique_ptr<CompileUnit>> &compile_units() const { return compile_units_; }
+
+      private:
+        void index() const;
+        void index_die(const DIE& current) const;
+
+        struct index_entry {
+          const CompileUnit* cu;
+          const std::byte* pos;
+        };
+        mutable std::unordered_multimap<std::string, index_entry> function_index_;
 
       private:
         const ELF *elf_;

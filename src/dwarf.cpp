@@ -237,6 +237,20 @@ namespace zdb {
         Cursor ref_cur({ cu_->data().begin() + offset, cu_->data().end() });
         return parse_die(*cu_, ref_cur);
     }
+
+    RangeList Attr::as_range_list() const {
+        auto section = cu_
+            ->dwarf_info()
+            ->elf()
+            ->get_section_contents_by_name(".debug_ranges");
+        auto offset = as_section_offset();
+        Span<const std::byte> data(section.begin() + offset, section.end());
+        auto root = cu_->root();
+        FileAddr base_address = root.contains(DW_AT_low_pc) ?
+            root[DW_AT_low_pc].as_address() :
+            FileAddr {};
+        return { cu_, data, base_address };
+    }
 }
 
 // For DIE::ChangeRange
@@ -306,18 +320,46 @@ namespace zdb {
     }
 
     FileAddr DIE::low_pc() const {
-        return (*this)[DW_AT_low_pc].as_address();
+        if (contains(DW_AT_ranges)) {
+            auto first_entry = (*this)[DW_AT_ranges].as_range_list().begin();
+            return first_entry->low;
+        } else if (contains(DW_AT_low_pc)) {
+            return (*this)[DW_AT_low_pc].as_address();
+        }
+        Error::send("DIE does not have low PC");
     }
 
     FileAddr DIE::high_pc() const {
-        Attr attr = (*this)[DW_AT_high_pc];
-        FileAddr addr;
-        if (attr.form() == DW_FORM_addr) {
-            addr = attr.as_address();
-        } else {
-            addr = low_pc() + attr.as_int();
+        if (contains(DW_AT_ranges)) {
+            auto ranges = (*this)[DW_AT_ranges].as_range_list();
+            auto it = ranges.begin();
+            while (std::next(it) != ranges.end()) ++it;
+            return it->high;
         }
-        return addr;
+        else if (contains(DW_AT_high_pc)) {
+            auto attr = (*this)[DW_AT_high_pc];
+            FileAddr addr;
+            if (attr.form() == DW_FORM_addr) {
+                return attr.as_address();
+            } else {
+                return low_pc() + attr.as_int();
+            }
+        }
+        Error::send("DIE does not have high PC");
+    }
+
+    bool DIE::contains_file_address(FileAddr address) const {
+        if (address.elf() != this->cu_->dwarf_info()->elf()) {
+            return false;
+        }
+
+        if (contains(DW_AT_ranges)) {
+            return (*this)[DW_AT_ranges].as_range_list().contains(address);
+        } else if (contains(DW_AT_low_pc)) {
+            return low_pc() <= address && high_pc() > address;
+        }
+
+        return false;
     }
 }
 
@@ -332,8 +374,55 @@ namespace zdb {
         ++(*this);
     }
 
+    zdb::RangeList::iterator& zdb::RangeList::iterator::operator++() {
+        auto elf = cu_->dwarf_info()->elf();
+        constexpr auto base_address_flag = ~static_cast<std::uint64_t>(0);
+        Cursor cur({ pos_, data_.end() });
+        while (true) {
+            current_.low = FileAddr { *elf, cur.u64() };
+            current_.high = FileAddr { *elf, cur.u64() };
+            if (current_.low.addr() == base_address_flag) {
+                // `base address selectors`, so sets the base address
+                base_address_ = current_.high;
+            } else if (current_.low.addr() == 0 and current_.high.addr() == 0) {
+                // `end-of-list indicator`
+                pos_ = nullptr;
+                break;
+            } else {
+                // `Regular entries selectors`
+                pos_ = cur.position();
+                current_.low += base_address_.addr();
+                current_.high += base_address_.addr();
+                break;
+            }
+        }
+        return *this;
+    }
+
+    zdb::RangeList::iterator zdb::RangeList::iterator::operator++(int) {
+        auto tmp = *this;
+        ++(*this);
+        return tmp;
+    }
+
+    RangeList::iterator RangeList::begin() const {
+        return { cu_, data_, base_address_ };
+    }
+
+    RangeList::iterator RangeList::end() const {
+        return {};
+    }
+
+    bool RangeList::contains(FileAddr address) const {
+        return std::any_of(
+            begin(), 
+            end(),
+            [=](auto& e) { return e.contains(address); }
+        );
+    }
 }
 
+// For Dwarf&CompileUnit
 namespace zdb {
     Dwarf::Dwarf(const ELF &parent) : elf_(&parent) {
         compile_units_ = parse_compile_units(*this, parent);
@@ -348,6 +437,58 @@ namespace zdb {
 
     const std::unordered_map<std::uint64_t, Abbrev>& CompileUnit::abbrev_table() const {
         return parent_->get_abbrev_table(abbrev_offset_);
+    }
+
+    const CompileUnit* Dwarf::compile_unit_containing_address(FileAddr address) const {
+        for (auto& cu : compile_units_) {
+            if (cu->root().contains_file_address(address)) {
+                return cu.get();
+            }
+        }
+        return nullptr;
+    }
+
+    std::optional<DIE> Dwarf::function_containing_address(FileAddr address) const {
+        index();
+        for (auto& [name, entry] : function_index_) {
+            Cursor cur({ entry.pos, entry.cu->data().end() });
+            auto d = parse_die(*entry.cu, cur);
+            if (d.contains_file_address(address) && d.abbrev_entry()->tag == DW_TAG_subprogram) {
+                // `DW_TAG_subprogram` is a regular function
+                return d;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::vector<DIE> Dwarf::find_functions(std::string name) const {
+        index();
+        std::vector<DIE> found;
+        auto [begin, end] = function_index_.equal_range(name);
+        std::transform(
+            begin, 
+            end, 
+            std::back_inserter(found), 
+            [](auto& pair) {
+                auto [name, entry] = pair;
+                cursor cur({ entry.pos, entry.cu->data().end() });
+                return parse_die(*entry.cu, cur);
+            }
+        );
+        return found;
+    }
+
+    void Dwarf::index() const {
+        if (!function_index_.empty()) {
+            return;
+        }
+        for (auto& cu : compile_units_) {
+            index_die(cu->root());
+        }
+    }
+
+    void Dwarf::index_die(const DIE& current) const {
+        
     }
 
     DIE CompileUnit::root() const {
