@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <vector>
+#include <cassert>
 
 namespace zdb {
     using byte64 = std::array<std::byte, 8>;
@@ -60,6 +61,83 @@ namespace zdb {
 
         private:
             uint64_t addr_;
+    };
+
+    class FileOffset {
+        public:
+            FileOffset() = default;
+            FileOffset(const ELF& elf, std::uint64_t offset): elf_(&elf), offset_(offset) {}
+            std::uint64_t off() const {
+                return offset_;
+            }
+            const ELF* elf_file() const {
+                return elf_;
+            }
+
+        private:
+            const ELF* elf_ = nullptr;
+            std::uint64_t offset_ = 0;
+    };
+
+    class FileAddr {
+        public:
+            FileAddr() = default;
+            FileAddr(const ELF& elf, std::uint64_t addr) : elf_(&elf), addr_(addr) {}
+
+            std::uint64_t addr() const { return addr_; }
+            const ELF* elf() const { return elf_; }
+
+            VirtualAddr to_virt_addr() const;
+
+            FileAddr operator+(std::int64_t offset) const {
+                return FileAddr(*elf_, addr_ + offset);
+            }
+
+            FileAddr operator-(std::int64_t offset) const {
+                return FileAddr(*elf_, addr_ - offset);
+            }
+
+            FileAddr& operator+=(std::int64_t offset) {
+                addr_ += offset;
+                return *this;
+            }
+
+            FileAddr& operator-=(std::int64_t offset) {
+                addr_ -= offset;
+                return *this;
+            }
+
+            bool operator==(const FileAddr& other) const {
+                return addr_ == other.addr_ and elf_ == other.elf_;
+            }
+
+            bool operator!=(const FileAddr& other) const {
+                return addr_ != other.addr_ or elf_ != other.elf_;
+            }
+
+            bool operator<(const FileAddr& other) const {
+                assert(elf_ == other.elf_);
+                return addr_ < other.addr_;
+            }
+
+            bool operator<=(const FileAddr& other) const {
+                assert(elf_ == other.elf_);
+                return addr_ <= other.addr_;
+            }
+
+            bool operator>(const FileAddr& other) const {
+                assert(elf_ == other.elf_);
+                return addr_ > other.addr_;
+            }
+
+            bool operator>=(const FileAddr& other) const {
+                assert(elf_ == other.elf_);
+                return addr_ >= other.addr_;
+            }
+
+        private:
+            const ELF* elf_ = nullptr;
+            std::uint64_t addr_;
     };
     
     template<class T>

@@ -7,11 +7,13 @@
 #include <string_view>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
 #include <memory>
 #include <libzdb/detail/dwarf.h>
 #include <optional>
 #include <libzdb/error.hpp>
 #include <string>
+#include <iostream>
 
 namespace {
     // `Cursor` type is to help us parse forms from various locations.
@@ -34,7 +36,7 @@ namespace {
         
         
         Cursor& operator++() { ++pos_; return *this; }
-        Cursor operator+=(std::size_t n) { pos_ += n; return *this; }
+        Cursor& operator+=(std::size_t n) { pos_ += n; return *this; }
         const std::byte& operator*() const { return *pos_; }
         bool is_finished() const { return pos_ >= data_.end(); }
         const std::byte* position() { return pos_; }
@@ -150,6 +152,7 @@ namespace zdb {
     class ELF;
     class Dwarf;
     class RangeList;
+    // class FileAddr;
 
 // ----------------------------------- For Abbrev & DIE -------------------------------------------------- //
     class Attr {
@@ -261,8 +264,7 @@ namespace zdb {
         FileAddr high_pc() const;
         bool contains_file_address(FileAddr address) const;
 
-
-
+        std::optional<std::string_view> name() const;
 
       private:
         const std::byte* pos_ = nullptr;

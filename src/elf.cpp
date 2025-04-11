@@ -25,7 +25,6 @@ namespace zdb {
             Error::send_errno("mmap file failed");
         }
 
-
         data_ = reinterpret_cast<std::byte*>(ret);
         std::copy(data_, data_ + sizeof(elf_header_), as_bytes<Elf64_Ehdr>(elf_header_));
 
@@ -34,6 +33,8 @@ namespace zdb {
 
         parse_symbol_table();
         build_symbol_name_to_sym_map();
+
+        dwarf_ = std::make_unique<Dwarf>(*this);
     }
 
     ELF::~ELF() {

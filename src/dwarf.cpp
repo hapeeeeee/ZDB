@@ -1,6 +1,11 @@
 #include <libzdb/dwarf.hpp>
+#include <libzdb/types.hpp>
+#include <libzdb/bit.hpp>
+#include <string_view>
+#include <algorithm>
 #include <libzdb/elf.hpp>
 #include <libzdb/error.hpp>
+ #include <iostream>
 
 namespace {
     // `.debug_info` section is split into information for each compile unit involved in the compilation of the program.
@@ -12,12 +17,12 @@ namespace {
     //    A 2-byte unsigned integer representing the DWARF version 
     //      for this compile unit information (four, in our case)
     // 
-    //    A 4-byte unsigned integer representing the offset into the `.debug_abbrev`
+    //    A 4-byte unsigned integer representing the offset into the `.debug_abbcrev`
     //      section at which the abbreviation table for this compile unit begins;
     // 
     //    A 1-byte unsigned integer representing the byte size of an address
     //      on the system (8 for x64)
-    std::unique_ptr<zdb::CompileUnit> parse_compile_unit(zdb::Dwarf& dwarf, const zdb::ELF& elf, Cursor &cursor) {
+    std::unique_ptr<zdb::CompileUnit> parse_compile_unit(zdb::Dwarf& dwarf, const zdb::ELF& elf, Cursor cursor) {
         const std::byte* pos = cursor.position();
         auto size = cursor.u32();
         auto version = cursor.u16();
@@ -47,7 +52,6 @@ namespace {
     parse_compile_units(zdb::Dwarf& dwarf, const zdb::ELF& elf) {
         auto debug_info = elf.get_section_contents_by_name(".debug_info");
         Cursor cursor(debug_info);
-        
         std::vector<std::unique_ptr<zdb::CompileUnit>> units;
         while (!cursor.is_finished()) {
             auto unit = parse_compile_unit(dwarf, elf, cursor);
@@ -361,6 +365,19 @@ namespace zdb {
 
         return false;
     }
+
+    std::optional<std::string_view> DIE::name() const {
+        if (contains(DW_AT_name)) {
+            return (*this)[DW_AT_name].as_string();
+        }
+        if (contains(DW_AT_specification)) {
+            return (*this)[DW_AT_specification].as_reference().name();
+        }
+        if (contains(DW_AT_abstract_origin)) {
+            return (*this)[DW_AT_abstract_origin].as_reference().name();
+        }
+        return std::nullopt;
+    }
 }
 
 // For RangeList
@@ -471,7 +488,7 @@ namespace zdb {
             std::back_inserter(found), 
             [](auto& pair) {
                 auto [name, entry] = pair;
-                cursor cur({ entry.pos, entry.cu->data().end() });
+                Cursor cur({ entry.pos, entry.cu->data().end() });
                 return parse_die(*entry.cu, cur);
             }
         );
@@ -488,7 +505,21 @@ namespace zdb {
     }
 
     void Dwarf::index_die(const DIE& current) const {
-        
+        bool has_range = 
+            current.contains(DW_AT_low_pc) || current.contains(DW_AT_ranges);
+
+        bool is_function = 
+            current.abbrev_entry()->tag == DW_TAG_subprogram || current.abbrev_entry()->tag == DW_TAG_inlined_subroutine;
+        if (has_range && is_function) {
+            if (auto name = current.name(); name) {
+                index_entry entry{ current.cu(), current.position() };
+                function_index_.emplace(*name, entry);
+            }
+        }
+
+        for (auto child : current.children()) {
+            index_die(child);
+        }
     }
 
     DIE CompileUnit::root() const {

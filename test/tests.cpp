@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <libzdb/target.hpp>
 #include <libzdb/elf.hpp>
+#include <libzdb/dwarf.hpp>
 
 using namespace zdb;
 
@@ -482,5 +483,50 @@ TEST_CASE("ELF parser works", "[elf]") {
     auto sym = elf.get_symbol_at_virt_addr(VirtualAddr{ 0xcafecafe + entry_virtual_addr_in_mem });
     name = elf.get_general_str_from_strtab(sym.value()->st_name);
     REQUIRE(name == "_start");
+}
 
+
+TEST_CASE("Correct DWARF language", "[dwarf]") {
+    auto path = "bin/hello_zdb";
+    zdb::ELF elf(path);
+    auto& compile_units = elf.get_dwarf().compile_units();
+    REQUIRE(compile_units.size() == 1);
+
+    auto& cu = compile_units[0];
+    auto lang = cu->root()[DW_AT_language].as_int();
+    REQUIRE(lang == DW_LANG_C_plus_plus);
+}
+
+TEST_CASE("Iterate DWARF", "[dwarf]") {
+    auto path = "bin/hello_zdb";
+    zdb::ELF elf(path);
+    auto& compile_units = elf.get_dwarf().compile_units();
+    REQUIRE(compile_units.size() == 1);
+
+    auto& cu = compile_units[0];
+    std::size_t count = 0;
+    for (auto& d : cu->root().children()) {
+        auto a = d.abbrev_entry();
+        REQUIRE(a->code != 0);
+        ++count;
+    }
+    REQUIRE(count > 0);
+}
+
+TEST_CASE("Find main", "[dwarf]") {
+    auto path = "bin/multi_cu2";
+    zdb::ELF elf(path);
+    zdb::Dwarf dwarf(elf);
+    bool found = false;
+    for (auto& cu : dwarf.compile_units()) {
+        for (auto& die : cu->root().children()) {
+            if (die.abbrev_entry()->tag == DW_TAG_subprogram && die.contains(DW_AT_name)) {
+                auto name = die[DW_AT_name].as_string();
+                if (name == "main") {
+                    found = true;
+                }
+            }
+        }
+    }
+    REQUIRE(found);
 }

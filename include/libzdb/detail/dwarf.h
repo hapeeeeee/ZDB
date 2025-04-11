@@ -1,6 +1,6 @@
 #ifndef SDB_DETAIL_DWARF_H
 #define SDB_DETAIL_DWARF_H
-
+// from https://github.com/TartanLlama/sdb/blob/chapter-12/include/libsdb/detail/dwarf.h
 enum {
     DW_TAG_array_type = 0x01,
     DW_TAG_class_type = 0x02,
