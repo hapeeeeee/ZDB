@@ -8,6 +8,142 @@
  #include <iostream>
 
 namespace {
+    // 12. file_names (a sequence of file entries) The source files involved in this compilation. 
+    //      Each entry contains the following: 
+    //        - a null-terminated string representing the filename, either as an absolute path, 
+    //              a path relative to the compilation directory, or a path relative to one of the directories 
+    //              specified in the include_directories field; 
+    //        - a ULEB128 representing the directory to which this path is relative, if it is a relative path 
+    //              (a value of 0 indicates that the compilation directory contains the path, 
+    //              while a value greater than 0 represents an index into the include_directories field,
+    //              which numbers its entries starting at 1); 
+    //        - a ULEB128 representing the file’s last modification time;
+    //        - a ULEB128 representing the byte size of the file. A single null byte terminates the sequence 
+    //              of entries.
+    zdb::LineTable::file parse_line_table_file(
+        Cursor& cur,
+        std::filesystem::path compilation_dir,
+        const std::vector<std::filesystem::path>& include_directories
+    ) {
+        auto file = cur.string();
+        auto dir_index = cur.uleb128();
+        auto modification_time = cur.uleb128();
+        auto file_length = cur.uleb128();
+        std::filesystem::path path = file;
+        if (file[0] != '/') {
+            if (dir_index == 0) {
+                path = compilation_dir / std::string(file);
+            } else {
+                path = include_directories[dir_index - 1] / std::string(file);
+            }
+        }
+        return {path.string(), modification_time, file_length};
+    }
+
+    // The line table program header consists of 12 fields:
+    //  1. unit_length (uint32_t): The byte size of the line number information 
+    //      for this compile unit, not including the unit_length field itself.
+    //  2. version (uint16_t) The version of the line number information. 
+    //      For DWARF 4, this value is 4.
+    //  3. header_length (uint32_t): The number of bytes from the end of the header_length
+    //      field until the beginning of the line number program.
+    //  4. minimum_instruction_length (uint8_t): The byte size of the smallest machine instruction. 
+    //      On x64, this is 1. 
+    //  5. maximum_operations_per_instruction (uint8_t) The maximum number of operations that may be encoded 
+    //      in an instruction. For architectures that are not very long instruction word (VLIW) architectures, 
+    //      this will always be 1 in x64. 
+    //  6. default_is_stmt (uint8_t) Whether rows in the matrix should be interpreted as the beginning of 
+    //      source code statements by default. This allows the producer to save space if most machine 
+    //      instructions are ordered in the same way as the source code statements, which is usually
+    //      true for unoptimized code.
+    //  7. line_base (int8_t) The minimum value that special opcodes can add to the line register. 
+    //      You’ll learn about special opcodes soon.
+    //  8. line_range (uint8_t) The range of values special opcodes can add to the line register.
+    //  9. opcode_base (uint8_t) The number assigned to the first special opcode.
+    // 10. standard_opcode_lengths (an array of uint8_t values) The number of operands that each 
+    //      standard opcode takes. The first element of this array corresponds to the first standard opcode, 
+    //      the second element to the second opcode, and so on. This field allows producers to describe any
+    //      additional standard opcodes they’ve used to consumers.
+    // 11. include_directories (a sequence of null-terminated strings) Contains each path that was searched 
+    //      for included files. Each entry is either an absolute path or a path relative to the compilation 
+    //      directory (specified with the `DW_AT_comp_dir` attribute on the root compile unit DIE). The
+    //      sequence ends with a single null byte.
+    // 12. file_names (a sequence of file entries) The source files involved in this compilation. 
+    //      see more detail in `parse_line_table_file` comment.
+    std::unique_ptr<zdb::LineTable> parse_line_table(const zdb::CompileUnit& cu) {
+        auto section = cu
+            .dwarf_info()
+            ->elf()
+            ->get_section_contents_by_name(".debug_line");
+
+        if (!cu.root().contains(DW_AT_stmt_list)) return nullptr;
+        auto offset = cu.root()[DW_AT_stmt_list].as_section_offset();
+        Cursor cur({ section.begin() + offset, section.end() });
+
+        auto size = cur.u32();
+        auto end = cur.position() + size;
+        auto version = cur.u16();
+        if (version != 4) 
+            zdb::Error::send("Only DWARF 4 is supported");
+
+        (void)cur.u32(); // Header length
+        auto minimum_instruction_length = cur.u8();
+        if (minimum_instruction_length != 1)
+            zdb::Error::send("Invalid minimum instruction length");
+
+        auto maximum_operations_per_instruction = cur.u8();
+        if (maximum_operations_per_instruction != 1)
+            zdb::Error::send("Invalid maximum operations per instruction");
+        
+        auto default_is_stmt = cur.u8();
+        auto line_base = cur.s8();
+        auto line_range = cur.u8();
+        auto opcode_base = cur.u8();
+
+
+        // We won’t support DWARF extensions, but we will support producers that decide 
+        // to not use all of the standard opcodes. Each standard opcode is assigned a 
+        // number, beginning at 1 and incrementing. DWARF 4 has 12 standard opcodes.
+        std::array<std::uint8_t, 12> expected_opcode_lengths {
+            0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1
+        };
+        for (auto i = 0; i < opcode_base - 1; ++i) {
+            if (cur.u8() != expected_opcode_lengths[i]) {
+                zdb::Error::send("Unexpected opcode length");
+            }   
+        }
+
+        std::vector<std::filesystem::path> include_directories;
+        std::filesystem::path compilation_dir (cu.root()[DW_AT_comp_dir].as_string());
+        for (auto dir = cur.string(); !dir.empty(); dir = cur.string()) {
+            if (dir[0] == '/') {
+                include_directories.push_back(std::string(dir));
+            } else { 
+                include_directories.push_back(compilation_dir / std::string(dir));
+            }
+        }
+
+        std::vector<zdb::LineTable::file> file_names;
+        while (*cur.position() != std::byte(0)) {
+            file_names.push_back(parse_line_table_file(cur, compilation_dir, include_directories));
+        }
+        // parse line_header completed.
+        cur += 1; // bringing the cursor to the beginning of the line table program. 
+
+        zdb::Span<const std::byte> data { cur.position(), end };
+        return std::make_unique<zdb::LineTable>(
+            data, 
+            &cu,
+            default_is_stmt,
+            line_base, 
+            line_range,
+            opcode_base,
+            std::move(include_directories), 
+            std::move(file_names) 
+        );
+    }
+
+
     // `.debug_info` section is split into information for each compile unit involved in the compilation of the program.
     // Every compile unit begins with a compile unit header, 
     // which describes four important characteristics of that unit:
@@ -441,6 +577,14 @@ namespace zdb {
 
 // For Dwarf&CompileUnit
 namespace zdb {
+    CompileUnit::CompileUnit(
+        Dwarf &dwarf, 
+        Span<const std::byte> data, 
+        std::size_t abbrev_offset
+    ) : parent_(&dwarf), data_(data), abbrev_offset_(abbrev_offset) {
+        line_table_ = parse_line_table(*this);
+    }
+
     Dwarf::Dwarf(const ELF &parent) : elf_(&parent) {
         compile_units_ = parse_compile_units(*this, parent);
     }

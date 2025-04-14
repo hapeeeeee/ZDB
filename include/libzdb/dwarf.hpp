@@ -152,7 +152,52 @@ namespace zdb {
     class ELF;
     class Dwarf;
     class RangeList;
-    // class FileAddr;
+  
+// ----------------------------------- For `.debug_line ` -------------------------------------------------- //
+    class LineTable {
+      public:
+        struct file {
+          std::filesystem::path path;
+          std::uint64_t modification_time;
+          std::uint64_t file_length;
+        };
+
+
+        LineTable(const LineTable&) = delete;
+        LineTable& operator=(const LineTable&) = delete;
+        LineTable(
+          Span<const std::byte> data,
+          const CompileUnit* cu,
+          bool default_is_stmt, 
+          std::int8_t line_base,
+          std::uint8_t line_range, 
+          std::uint8_t opcode_base,
+          std::vector<std::filesystem::path> include_directories,
+          std::vector<file> file_names
+        ) : data_(data), 
+        cu_(cu), 
+        default_is_stmt_(default_is_stmt), 
+        line_base_(line_base), 
+        line_range_(line_range), 
+        opcode_base_(opcode_base), 
+        include_directories_(std::move(include_directories)), 
+        file_names_(std::move(file_names)) {}
+
+        const CompileUnit& cu() const { return *cu_; }
+        const std::vector<file>& file_names() const { return file_names_; }
+
+
+      private:
+        Span<const std::byte> data_;
+        const CompileUnit* cu_;
+        bool default_is_stmt_;
+        std::int8_t line_base_;
+        std::uint8_t line_range_;
+        std::uint8_t opcode_base_;
+        std::vector<std::filesystem::path> include_directories_;
+        mutable std::vector<file> file_names_;
+
+    };
 
 // ----------------------------------- For Abbrev & DIE -------------------------------------------------- //
     class Attr {
@@ -415,10 +460,11 @@ namespace zdb {
           Dwarf &dwarf, 
           Span<const std::byte> data, 
           std::size_t abbrev_offset
-        ) : parent_(&dwarf), data_(data), abbrev_offset_(abbrev_offset) {}
+        );
 
         const Dwarf* dwarf_info() const { return parent_; }
         Span<const std::byte> data() const { return data_; }
+        const LineTable& lines() const { return *line_table_; }
 
         const std::unordered_map<std::uint64_t, Abbrev>& abbrev_table() const;
 
@@ -428,6 +474,7 @@ namespace zdb {
         Dwarf* parent_;
         Span<const std::byte> data_;
         std::size_t abbrev_offset_;
+        std::unique_ptr<LineTable> line_table_;
     };
 
 
