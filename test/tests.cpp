@@ -530,3 +530,41 @@ TEST_CASE("Find main", "[dwarf]") {
     }
     REQUIRE(found);
 }
+
+TEST_CASE("Range list", "[dwarf]") {
+    auto path = "bin/hello_zdb";
+    zdb::ELF elf(path);
+    zdb::Dwarf dwarf(elf);
+    auto& cu = dwarf.compile_units()[0];
+    std::vector<std::uint64_t> range_data {
+        0x12341234, 0x12341236, ///< regular entry
+        ~0ULL, 0x32,            ///< base address selector
+        0x12341234, 0x12341236, ///< regular entry
+        0x0, 0x0                ///< end of list indicator
+    };
+    auto bytes = reinterpret_cast<std::byte*>(range_data.data());
+    zdb::RangeList list(cu.get(),{ bytes, bytes + range_data.size() }, zdb::FileAddr{});
+    
+    auto it = list.begin();
+    auto e1 = *it;
+    REQUIRE(e1.low.addr() == 0x12341234);
+    REQUIRE(e1.high.addr() == 0x12341236);
+    REQUIRE(e1.contains(zdb::FileAddr{ elf, 0x12341234 }));
+    REQUIRE(e1.contains(zdb::FileAddr{ elf, 0x12341235 }));
+    REQUIRE(!e1.contains(zdb::FileAddr{ elf, 0x12341236 }));
+    ++it;
+    auto e2 = *it;
+    REQUIRE(e2.low.addr() == 0x12341266);
+    REQUIRE(e2.high.addr() == 0x12341268);
+    REQUIRE(e2.contains(zdb::FileAddr{ elf, 0x12341266 }));
+    REQUIRE(e2.contains(zdb::FileAddr{ elf, 0x12341267 }));
+    REQUIRE(!e2.contains(zdb::FileAddr{ elf, 0x12341268 }));
+    ++it;
+    REQUIRE(it == list.end());
+    REQUIRE(list.contains(zdb::FileAddr{ elf, 0x12341234 }));
+    REQUIRE(list.contains(zdb::FileAddr{ elf, 0x12341235 }));
+    REQUIRE(!list.contains(zdb::FileAddr{ elf, 0x12341236 }));
+    REQUIRE(list.contains(zdb::FileAddr{ elf, 0x12341266 }));
+    REQUIRE(list.contains(zdb::FileAddr{ elf, 0x12341267 }));
+    REQUIRE(!list.contains(zdb::FileAddr{ elf, 0x12341268 }));
+}
