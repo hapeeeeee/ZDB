@@ -14,6 +14,7 @@
 #include <libzdb/error.hpp>
 #include <string>
 #include <iostream>
+#include <filesystem>
 
 namespace {
     // `Cursor` type is to help us parse forms from various locations.
@@ -162,6 +163,7 @@ namespace zdb {
           std::uint64_t file_length;
         };
 
+        struct entry;
 
         LineTable(const LineTable&) = delete;
         LineTable& operator=(const LineTable&) = delete;
@@ -186,6 +188,9 @@ namespace zdb {
         const CompileUnit& cu() const { return *cu_; }
         const std::vector<file>& file_names() const { return file_names_; }
 
+        class iterator;
+        iterator begin() const;
+        iterator end() const;
 
       private:
         Span<const std::byte> data_;
@@ -196,7 +201,58 @@ namespace zdb {
         std::uint8_t opcode_base_;
         std::vector<std::filesystem::path> include_directories_;
         mutable std::vector<file> file_names_;
+    };
 
+    struct LineTable::entry {
+        FileAddr address;
+        std::uint64_t file_index = 1;
+        std::uint64_t line = 1;
+        std::uint64_t column = 0;
+        bool is_stmt;                   ///< Whether this instruction marks the beginning of a statement,
+        bool basic_block_start = false;
+        bool end_sequence = false;      ///< Whether this entry is special, and marks the byte immediately following a sequence of instructions
+        bool prologue_end = false;      ///< Whether this instruction marks the end of the function prologue, and thus should be used for function-entry breakpoints. 
+        bool epilogue_begin = false;    ///< Whether this instruction marks the beginning of the function epilogue, and thus should be used for function-exit breakpoints
+        std::uint64_t discriminator = 0;
+        file* file_entry = nullptr;
+
+        bool operator==(const entry& rhs) const {
+            return address == rhs.address 
+                && file_index == rhs.file_index
+                && line == rhs.line 
+                && column == rhs.column
+                && discriminator == rhs.discriminator;
+      }
+    };
+
+    class LineTable::iterator {
+      public:
+        using value_type = entry; 
+        using pointer = const entry*;
+        using reference = const entry&;
+        using difference_type = std::ptrdiff_t;
+        using iterator_category = std::forward_iterator_tag;
+
+        iterator(const LineTable* table_); 
+        iterator() = default; 
+        iterator(const iterator&) = default;
+
+        iterator& operator=(const iterator&) = default;
+        const LineTable::entry& operator*() const { return current_; } 
+        const LineTable::entry* operator->() const { return &current_; }
+        bool operator==(const iterator& rhs) const { return pos_ == rhs.pos_; } 
+        bool operator!=(const iterator& rhs) const { return pos_ != rhs.pos_; }
+
+        iterator& operator++(); 
+        iterator operator++(int);
+
+        bool execute_instruction();
+
+      private:
+        const LineTable* table_; 
+        LineTable::entry current_;
+        LineTable::entry registers_;
+        const std::byte* pos_;
     };
 
 // ----------------------------------- For Abbrev & DIE -------------------------------------------------- //

@@ -482,6 +482,26 @@ enum {
     DW_DSC_range = 0x01,
 };
 
+// Standard Opcodes
+//  DWARF 4 specifies 12 standard opcodes, each of which has a specific meaning. 
+//  Here are the opcode values, their operands, their names, and what they
+//  signify:
+//      - `DW_LNS_copy`: (no operands) Emits a matrix row using the current values
+//          of the abstract machine registers and then resets the discriminator register 
+//          to 0 and the basic_block, prologue_end, and epilogue_begin registers to false.
+//      - `DW_LNS_advance_pc`: (one ULEB128 operand) Adds the operand to the address register.
+//      - `DW_LNS_advance_line` (one SLEB128 operand) Adds the operand to the line register.
+//      - `DW_LNS_set_file` (one ULEB128 operand) Stores the operand in the file register.
+//      - `DW_LNS_set_column` (one ULEB128 operand) Stores the operand in the column register.
+//      - `DW_LNS_negate_stmt` (no operands) Sets the is_stmt register to the negation of its current value.
+//      - `DW_LNS_set_basic_block` (no operands) Sets the basic_block register to true.
+//      - `DW_LNS_const_add_pc` (no operands) Advances the address register by the same amount as special opcode 255 would.
+//      - `DW_LNS_fixed_advance_pc` (one uint16_t operand) Adds the operand to the address register. 
+//          This standard opcode is the only one that takes a fixed-sized operand. 
+//          It exists to support assemblers that don’t support LEB128 encoding.
+//      - `DW_LNS_set_prologue_end` (no operands) Sets the prologue_end register to true.
+//      - `DW_LNS_set_epilogue_begin` (no operands) Sets the epilogue_begin register to true.
+//      - `DW_LNS_set_isa` (one ULEB128 operand) Stores the operand in the isa register.
 enum {
     DW_LNS_copy = 0x01,
     DW_LNS_advance_pc = 0x02,
@@ -497,6 +517,15 @@ enum {
     DW_LNS_set_isa = 0x0c,
 };
 
+// Extended opcode
+//      - `DW_LNE_end_sequence` (no operands) Sets the end_sequence register to true
+//          and emits a matrix row using the current values of the abstract machine
+//          registers. It then resets the registers to their default values. Every line
+//          table program ends with an instruction of this type.
+//      - `DW_LNE_set_address` (one uint64_t operand) Stores the operand in the address register.
+//      - `DW_LNE_define_file` (one file entry) Appends a file entry to the file_names line table 
+//          program header field. This file entry has the same format as the file_names line table program header field.
+//      - `DW_LNE_set_discriminator` (one ULEB128 operand) Stores the operand in the discriminator register
 enum {
     DW_LNE_end_sequence = 0x01,
     DW_LNE_set_address = 0x02,

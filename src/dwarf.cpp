@@ -393,6 +393,159 @@ namespace zdb {
     }
 }
 
+// For LineTable
+namespace zdb {
+    LineTable::iterator::iterator(const LineTable* table_) 
+    : table_(table_) , pos_(table_->data_.begin())
+    {
+        registers_.is_stmt = table_->default_is_stmt_;
+        ++(*this);
+    }
+
+    LineTable::iterator LineTable::begin() const {
+        return iterator(this);
+    }
+
+    LineTable::iterator LineTable::end() const {
+        return {};
+    }
+
+    LineTable::iterator& LineTable::iterator::operator++() {
+        if (pos_ == table_->data_.end()) {
+            pos_ = nullptr;
+            return *this;
+        }
+
+        bool emitted = false;
+        do {
+            emitted = execute_instruction();
+        } while (!emitted);
+
+        current_.file_entry = &table_->file_names_[current_.file_index - 1];
+        return *this;
+    }
+
+    LineTable::iterator LineTable::iterator::operator++(int) {
+        auto tmp = *this;
+        ++(*this);
+        return tmp;
+    }
+
+    // Each instruction belongs to one of three categories:
+    //  `Standard opcode`: A uint8_t opcode that names an operation, such as
+    //      `DW_LNS_advance_line`, for advancing the current line by a given amount,
+    //      or DW_LNS_set_basic_block, for setting the basic_block register to true. The
+    //      number and type of operands that a standard opcode takes depends on
+    //      which opcode it is.
+    //  `Extended opcode`: Used to encode more complex instructions. Extended opcodes 
+    //      begin with a null byte, followed by a ULEB128 giving the size of the next instruction. 
+    //      After this size comes a uint8_t providing the extended opcode and then the operands.
+    //  `Special opcode`: Used to advance the current line and address and emit
+    //      a matrix row, all in a single opcode. Special opcodes consist of a single
+    //       uint8_t with no operands.
+    bool LineTable::iterator::execute_instruction() {
+        auto elf = table_->cu_->dwarf_info()->elf();
+        Cursor cur({ pos_, table_->data_.end() });
+        auto opcode = cur.u8();
+        bool emitted = false;
+        if (0 < opcode && opcode < table_->opcode_base_) {
+            // Handle standard opcode, See more detail in `include/libzdb/detail/dwarf.h`
+            switch (opcode) {
+            case DW_LNS_copy: 
+                current_ = registers_;
+                registers_.basic_block_start = false;
+                registers_.prologue_end = false;
+                registers_.epilogue_begin = false;
+                registers_.discriminator = 0;
+                emitted = true;
+                break;
+            case DW_LNS_advance_pc:
+                registers_.address += cur.uleb128();
+                break;
+            case DW_LNS_advance_line:
+                registers_.line += cur.sleb128();
+                break;
+            case DW_LNS_set_file:
+                registers_.file_index = cur.uleb128();
+                break;
+            case DW_LNS_set_column:
+                registers_.column = cur.uleb128();
+                break;
+            case DW_LNS_negate_stmt:
+                registers_.is_stmt = !registers_.is_stmt;
+                break;
+            case DW_LNS_set_basic_block:
+                registers_.basic_block_start = true;
+                break;
+            case DW_LNS_const_add_pc:
+                registers_.address += (255 - table_->opcode_base_) / table_->line_range_;
+                break;
+            case DW_LNS_fixed_advance_pc:
+                registers_.address += cur.u16();
+                break;
+            case DW_LNS_set_prologue_end:
+                registers_.prologue_end = true;
+                break;
+            case DW_LNS_set_epilogue_begin:
+                registers_.epilogue_begin = true;
+                break;
+            case DW_LNS_set_isa:
+                //  we ignore the isa register, DW_LNS_set_isa does nothing, because only x64.
+                break;
+            default:
+                Error::send("Unexpected standard opcode");
+            }
+        }
+        else if (opcode == 0) {
+            auto length = cur.uleb128();
+            auto extended_opcode = cur.u8();
+
+            switch (extended_opcode) {
+            case DW_LNE_end_sequence: 
+                registers_.end_sequence = true;
+                current_ = registers_;
+                registers_ = entry{};
+                registers_.is_stmt = table_->default_is_stmt_;
+                emitted = true;
+                break;
+            case DW_LNE_set_address: 
+                registers_.address = FileAddr(*elf, cur.u64());
+                break;
+            case DW_LNE_define_file: { 
+                auto compilation_dir = table_->cu_->root()[DW_AT_comp_dir].as_string();
+                auto file = parse_line_table_file(
+                    cur, 
+                    std::string(compilation_dir), 
+                    table_->include_directories_
+                );
+                table_->file_names_.push_back(file);
+                break;
+            }
+            case DW_LNE_set_discriminator:
+                registers_.discriminator = cur.uleb128();
+                break;
+            default:
+                Error::send("Unexpected extended opcode");
+            }
+        }
+        else {
+            // see `Special opcode` thory in page.357/389, chapter13, book:"building a debugger"
+            auto adjusted_opcode = opcode - table_->opcode_base_;
+            registers_.address += adjusted_opcode / table_->line_range_;
+            registers_.line +=
+            table_->line_base_ + (adjusted_opcode % table_->line_range_);
+            current_ = registers_;
+            registers_.basic_block_start = false;
+            registers_.prologue_end = false;
+            registers_.epilogue_begin = false;
+            registers_.discriminator = 0;
+            emitted = true;
+        }
+        pos_ = cur.position();
+        return emitted;
+    }
+}
+
 // For DIE::ChangeRange
 namespace zdb {
     DIE::ChildrenRange::iterator::iterator(const zdb::DIE& d) {
