@@ -100,7 +100,6 @@ namespace {
         auto line_range = cur.u8();
         auto opcode_base = cur.u8();
 
-
         // We won’t support DWARF extensions, but we will support producers that decide 
         // to not use all of the standard opcodes. Each standard opcode is assigned a 
         // number, beginning at 1 and incrementing. DWARF 4 has 12 standard opcodes.
@@ -256,6 +255,19 @@ namespace {
 
         return abbrev_table;
     }
+
+    bool path_ends_with(
+        const std::filesystem::path& lhs,
+        const std::filesystem::path& rhs
+    ) {
+        auto lhs_size = std::distance(lhs.begin(), lhs.end());
+        auto rhs_size = std::distance(rhs.begin(), rhs.end());
+        if (rhs_size > lhs_size) {
+            return false;
+        }
+        auto start = std::next(lhs.begin(), lhs_size - rhs_size);
+        return std::equal(start, lhs.end(), rhs.begin());
+    }
 }
 
 // For Attr 
@@ -410,6 +422,39 @@ namespace zdb {
         return {};
     }
 
+    LineTable::iterator LineTable::get_entry_by_address(FileAddr address) const {
+        auto prev = begin();
+        if (prev == end()) {
+            return prev;
+        }
+
+        auto it = prev;
+        for (++it; it != end(); prev = it++) {
+            if (prev->address <= address && address < it->address && !prev->end_sequence) {
+                return prev;
+            }
+        }
+        return end();
+    }
+
+    std::vector<LineTable::iterator> LineTable::get_entries_by_line(
+        std::filesystem::path path, 
+        std::size_t line
+    ) const {
+        std::vector<iterator> entries;
+        for (auto it = begin(); it != end(); ++it) {
+            auto& entry_path = it->file_entry->path;
+            if (it->line == line) {
+                if ((path.is_absolute() && entry_path == path) 
+                    ||(path.is_relative() && path_ends_with(entry_path, path))
+                ) {
+                    entries.push_back(it);
+                }
+            }
+        }
+        return entries;
+    }
+
     LineTable::iterator& LineTable::iterator::operator++() {
         if (pos_ == table_->data_.end()) {
             pos_ = nullptr;
@@ -532,8 +577,7 @@ namespace zdb {
             // see `Special opcode` thory in page.357/389, chapter13, book:"building a debugger"
             auto adjusted_opcode = opcode - table_->opcode_base_;
             registers_.address += adjusted_opcode / table_->line_range_;
-            registers_.line +=
-            table_->line_base_ + (adjusted_opcode % table_->line_range_);
+            registers_.line += table_->line_base_ + (adjusted_opcode % table_->line_range_);
             current_ = registers_;
             registers_.basic_block_start = false;
             registers_.prologue_end = false;
@@ -666,6 +710,29 @@ namespace zdb {
             return (*this)[DW_AT_abstract_origin].as_reference().name();
         }
         return std::nullopt;
+    }
+
+    SourceLocation DIE::location() const {
+        return { &file(), line() };
+    }
+
+    const LineTable::file& DIE::file() const {
+        std::uint64_t idx;
+        if (abbrev_->tag == DW_TAG_inlined_subroutine) {
+            idx = (*this)[DW_AT_call_file].as_int();
+        }
+        else {
+            idx = (*this)[DW_AT_decl_file].as_int();
+        }
+        return this->cu_->lines().file_names()[idx - 1];
+    }
+
+    std::uint64_t DIE::line() const {
+        if (abbrev_->tag == DW_TAG_inlined_subroutine) {
+            return (*this)[DW_AT_call_line].as_int();
+        }
+
+        return (*this)[DW_AT_decl_line].as_int();
     }
 }
 

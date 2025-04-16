@@ -192,6 +192,9 @@ namespace zdb {
         iterator begin() const;
         iterator end() const;
 
+        iterator get_entry_by_address(FileAddr address) const;
+        std::vector<iterator> get_entries_by_line(std::filesystem::path path, std::size_t line) const;
+
       private:
         Span<const std::byte> data_;
         const CompileUnit* cu_;
@@ -256,6 +259,11 @@ namespace zdb {
     };
 
 // ----------------------------------- For Abbrev & DIE -------------------------------------------------- //
+    struct SourceLocation {
+        const LineTable::file* file;
+        std::uint64_t line;
+    };
+
     class Attr {
       public:
         Attr(const CompileUnit* cu, std::uint64_t type, std::uint64_t form, const std::byte* location) 
@@ -366,6 +374,11 @@ namespace zdb {
         bool contains_file_address(FileAddr address) const;
 
         std::optional<std::string_view> name() const;
+
+        SourceLocation location() const;
+        const LineTable::file& file() const;
+        std::uint64_t line() const;
+
 
       private:
         const std::byte* pos_ = nullptr;
@@ -545,6 +558,12 @@ namespace zdb {
 
         const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);
         const std::vector<std::unique_ptr<CompileUnit>> &compile_units() const { return compile_units_; }
+
+        LineTable::iterator line_entry_at_address(FileAddr address) const {
+          auto cu = compile_unit_containing_address(address);
+          if (!cu) return {};
+          return cu->lines().get_entry_by_address(address);
+        }
 
       private:
         void index() const;

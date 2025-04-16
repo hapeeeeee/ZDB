@@ -568,3 +568,24 @@ TEST_CASE("Range list", "[dwarf]") {
     REQUIRE(list.contains(zdb::FileAddr{ elf, 0x12341267 }));
     REQUIRE(!list.contains(zdb::FileAddr{ elf, 0x12341268 }));
 }
+
+TEST_CASE("Line table", "[dwarf]") {
+    auto path = "bin/hello_zdb";
+    zdb::ELF elf(path);
+    zdb::Dwarf dwarf(elf);
+    REQUIRE(dwarf.compile_units().size() == 1);
+    auto& cu = dwarf.compile_units()[0];
+    auto it = cu->lines().begin();
+    REQUIRE(it->line == 3);
+    REQUIRE(it->file_entry->path.filename() == "hello_zdb.cpp");
+    ++it;
+    REQUIRE(it->line == 4);
+    ++it;
+    REQUIRE(it->line == 5);
+    ++it;
+    REQUIRE(it->line == 6);
+    ++it;
+    REQUIRE(it->end_sequence);
+    ++it;
+    REQUIRE(it == cu->lines().end());
+}
