@@ -859,6 +859,32 @@ namespace zdb {
         return found;
     }
 
+    std::vector<DIE> Dwarf::inline_stack_at_file_address(FileAddr address) const {
+        auto func = function_containing_address(address);
+        std::vector<DIE> inline_stack;
+        if (func) {
+            inline_stack.push_back(*func);
+            while (true) {
+                const auto& children = inline_stack.back().children();
+                auto found = std::find_if(
+                    children.begin(), 
+                    children.end(),
+                    [=](auto& child) {
+                        return child.abbrev_entry()->tag == DW_TAG_inlined_subroutine 
+                            && child.contains_address(address);
+                    }
+                );
+
+                if (found == children.end()) {
+                    break;
+                } else { 
+                    inline_stack.push_back(*found);
+                }
+            }
+        }
+        return inline_stack;
+    }
+
     void Dwarf::index() const {
         if (!function_index_.empty()) {
             return;

@@ -555,6 +555,7 @@ namespace zdb {
         const CompileUnit* compile_unit_containing_address(FileAddr address) const;
         std::optional<DIE> function_containing_address(FileAddr address) const;
         std::vector<DIE> find_functions(std::string name) const;
+        std::vector<DIE> inline_stack_at_file_address(FileAddr address) const;
 
         const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);
         const std::vector<std::unique_ptr<CompileUnit>> &compile_units() const { return compile_units_; }
@@ -564,6 +565,7 @@ namespace zdb {
           if (!cu) return {};
           return cu->lines().get_entry_by_address(address);
         }
+        
 
       private:
         void index() const;

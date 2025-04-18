@@ -6,6 +6,7 @@
 #include <libzdb/bit.hpp>
 #include <fstream>
 #include <elf.h>
+#include <libzdb/target.hpp>
 namespace {
     void set_ptrace_options(pid_t pid) {
         if (ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD) < 0) {
@@ -270,6 +271,10 @@ zdb::StopReason zdb::Process::wait_on_signal() {
     }
     else if (stop_reason.trap_type == TrapType::Syscall) {
         stop_reason = resume_from_untrack_syscall(stop_reason);
+    }
+
+    if (target_) {
+        target_->notify_stop(stop_reason);
     }
     return stop_reason;
 }

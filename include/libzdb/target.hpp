@@ -11,6 +11,8 @@
 #include <memory>
 #include <optional>
 #include <libzdb/process.hpp>
+#include <libzdb/elf.hpp>
+#include <libzdb/stack.hpp>
 
 
 namespace zdb {
@@ -30,13 +32,27 @@ namespace zdb {
         const Process& get_process() const { return *process_; }
         ELF& get_elf() { return *elf_; }
         const ELF& get_elf() const { return *elf_; }
+        Stack& get_stack() { return stack_; }
+        const Stack& get_stack() const { return stack_; }
+
+
+        FileAddr get_pc_file_address() const;
+        void notify_stop(const StopReason& reason);
+
+        LineTable::iterator line_entry_at_pc() const;
+        StopReason run_until_address(VirtualAddr address);
+
+        StopReason step_in();
+        StopReason step_out();
+        StopReason step_over();
     
       private:
         Target(std::unique_ptr<Process> process, std::unique_ptr<ELF> elf)
-        : process_(std::move(process)), elf_(std::move(elf)) {}
+        : process_(std::move(process)), elf_(std::move(elf)), stack_(this) {}
       private:
         std::unique_ptr<Process> process_;
         std::unique_ptr<ELF> elf_;
+        Stack stack_;
     };
 }
 

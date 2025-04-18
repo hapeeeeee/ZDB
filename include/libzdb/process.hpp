@@ -47,6 +47,26 @@ namespace zdb {
 
     struct StopReason {
         StopReason(int wait_status);
+        StopReason(
+            ProcessState reason, 
+            std::uint8_t info, 
+            std::optional<TrapType> trap_type = std::nullopt,
+            std::optional<SyscallInfo> syscall_info = std::nullopt
+        ): reason(reason), info(info), trap_type(trap_type), syscall_info(syscall_info) {}
+
+        bool is_step() const {
+            return reason == ProcessState::Stopped
+                && info == SIGTRAP
+                && trap_type == TrapType::SignalStep;
+        }
+
+        bool is_breakpoint() const {
+            return reason == ProcessState::Stopped
+                && info == SIGTRAP
+                && (trap_type == TrapType::SoftwareBreakpoint
+                    || trap_type == TrapType::HardwareBreakpoint);
+        }
+
         ProcessState reason;
         std::uint8_t info;
         std::optional<TrapType> trap_type;
@@ -80,6 +100,8 @@ namespace zdb {
         std::vector<int> to_catch_;
 
     };
+
+    class Target;
     class Process {
       public:
         Process()                = delete;
@@ -109,6 +131,7 @@ namespace zdb {
         const Registers& get_registers() const { return *registers_; }
         VirtualAddr get_pc() const { return VirtualAddr(get_registers().read_by_id_as<std::uint64_t>(RegisterId::rip)); }
         void set_pc(VirtualAddr addr) { get_registers().write_by_id(RegisterId::rip, addr.addr());}
+        void set_target(Target* target) { target_ = target; }  
 
         pid_t pid() const { return pid_;}
         ProcessState state() const { return state_;}
@@ -148,6 +171,8 @@ namespace zdb {
         StoppointCollection<BreakpointSite> breakpoint_sites_;
         StoppointCollection<Watchpoint> watchpoints_;
         SyscallCatchPolicy syscall_catch_policy_ = SyscallCatchPolicy::catch_none();
+
+        Target* target_ = nullptr;
       private:
         Process(pid_t pid, bool terminate_on_end, bool is_attached)
             : pid_(pid), terminate_on_end_(terminate_on_end), is_attached_(is_attached),
