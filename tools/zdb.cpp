@@ -180,7 +180,10 @@ namespace {
                 continue    - Resume the process
                 register    - Commands for operating on registers
                 memory      - Commands for operating on memory
-                step        - Step over a single instruction)" << std::endl;
+                step        - Step-in
+                next        - Step-over
+                finish      - Step-out
+                stepi       - Single instruction step)" << std::endl;
         } else if (args[1] == "register") {
             std::cerr << R"(Available commands:
             read
@@ -600,10 +603,20 @@ namespace {
             handle_register_command(*process, args);
         } else if (is_prefix(command, "breakpoint")) {
             handle_breakpoint_command(*process, args);
-        } else if (is_prefix(command, "step")) {
+        } else if (is_prefix(command, "stepi")) {
             auto stop_reason = process->step();
             handle_stop(*target, stop_reason);
-        } else if (is_prefix(command, "memory")) {
+        } else if (is_prefix(command, "next")) {
+            auto reason = target->step_over();
+            handle_stop(*target, reason);
+        } else if (is_prefix(command, "finish")) {
+            auto reason = target->step_out();
+            handle_stop(*target, reason);
+        } else if (is_prefix(command, "step")) {
+            auto reason = target->step_in();
+            handle_stop(*target, reason);
+        }
+        else if (is_prefix(command, "memory")) {
             handle_memory_command(*process, args);
         } else if (is_prefix(command, "disassemble")) {
             handle_disassemble_command(*process, args);

@@ -48,8 +48,8 @@ namespace zdb {
     struct StopReason {
         StopReason(int wait_status);
         StopReason(
-            ProcessState reason, 
-            std::uint8_t info, 
+            ProcessState reason = ProcessState::Stopped, 
+            std::uint8_t info = 0, 
             std::optional<TrapType> trap_type = std::nullopt,
             std::optional<SyscallInfo> syscall_info = std::nullopt
         ): reason(reason), info(info), trap_type(trap_type), syscall_info(syscall_info) {}
@@ -136,7 +136,19 @@ namespace zdb {
         pid_t pid() const { return pid_;}
         ProcessState state() const { return state_;}
 
-        BreakpointSite& create_breakpoint_site(VirtualAddr address, bool is_internal = false, bool is_hardware = false);
+        BreakpointSite& create_breakpoint_site(
+          VirtualAddr address, 
+          bool is_internal = false, 
+          bool is_hardware = false
+        );
+        BreakpointSite& create_breakpoint_site(
+          Breakpoint* parent, 
+          BreakpointSite::id_type id, 
+          VirtualAddr address,
+          bool hardware = false, 
+          bool internal = false
+        );
+
         StoppointCollection<BreakpointSite>& breakpoint_sites() { return breakpoint_sites_; }
         const StoppointCollection<BreakpointSite>& breakpoint_sites() const { return breakpoint_sites_; }
         int set_hardware_breakpoint(BreakpointSite::id_type id, VirtualAddr address);

@@ -8,6 +8,7 @@
 namespace zdb {
 class Process;
 
+    class Breakpoint;
     class BreakpointSite {
       public:
         using id_type = std::int32_t;
@@ -36,6 +37,7 @@ class Process;
 
       private:
         id_type id_;
+        Breakpoint* parent_;
         int hardware_register_id_ = -1;
         bool is_enabled_;
         bool is_hardware_;
@@ -47,6 +49,15 @@ class Process;
         friend Process;
         BreakpointSite(
             Process& proc, 
+            VirtualAddr address, 
+            bool is_internal = false, 
+            bool is_hardware = false
+        );
+
+        BreakpointSite(
+            Process& proc, 
+            Breakpoint* parent,
+            id_type id,
             VirtualAddr address, 
             bool is_internal = false, 
             bool is_hardware = false

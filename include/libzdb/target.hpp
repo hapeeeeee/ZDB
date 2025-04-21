@@ -45,10 +45,20 @@ namespace zdb {
         StopReason step_in();
         StopReason step_out();
         StopReason step_over();
-    
+
+        // This Struct only for `FunctionBreakpoint`
+        struct find_functions_result {
+          std::vector<DIE> dwarf_functions;
+          // May be used by share lib
+          std::vector<std::pair<const ELF*, const Elf64_Sym*>> elf_functions;
+        };
+        find_functions_result find_functions(std::string name) const;
+
+
       private:
         Target(std::unique_ptr<Process> process, std::unique_ptr<ELF> elf)
         : process_(std::move(process)), elf_(std::move(elf)), stack_(this) {}
+
       private:
         std::unique_ptr<Process> process_;
         std::unique_ptr<ELF> elf_;

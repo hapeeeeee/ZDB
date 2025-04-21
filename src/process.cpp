@@ -221,9 +221,9 @@ zdb::StopReason zdb::Process::resume_from_untrack_syscall(const StopReason &reas
 
 zdb::StopReason zdb::Process::step() {
     std::optional<BreakpointSite*> to_reenable;
-    auto pc = get_pc();
+    VirtualAddr pc = get_pc();
     if (breakpoint_sites_.enabled_stoppoint_at_address(pc)) {
-        auto &bp = breakpoint_sites_.get_by_address(pc);
+        BreakpointSite &bp = breakpoint_sites_.get_by_address(pc);
         bp.disable();
         to_reenable = &bp;
     }
@@ -378,7 +378,11 @@ void zdb::Process::write_gprs(const user_regs_struct& gprs) {
     }
 }
 
-zdb::BreakpointSite& zdb::Process::create_breakpoint_site(VirtualAddr address, bool is_internal, bool is_hardware) {
+zdb::BreakpointSite& zdb::Process::create_breakpoint_site(
+    VirtualAddr address, 
+    bool is_internal, 
+    bool is_hardware
+) {
     if (breakpoint_sites_.contains_address(address)) {
         Error::send(
             "Breakpoint site already exists as address " + std::to_string(address.addr())
@@ -388,6 +392,26 @@ zdb::BreakpointSite& zdb::Process::create_breakpoint_site(VirtualAddr address, b
         new BreakpointSite(*this, address, is_internal, is_hardware)
     );
     return breakpoint_sites_.push(std::move(site));
+}
+
+zdb::BreakpointSite& zdb::Process::create_breakpoint_site(
+    Breakpoint* parent, 
+    BreakpointSite::id_type id, 
+    VirtualAddr address,
+    bool hardware, 
+    bool internal
+) {
+    if (breakpoint_sites_.contains_address(address)) {
+        Error::send(
+            "Breakpoint site already exists as address " + std::to_string(address.addr())
+        );
+    }
+
+    return breakpoint_sites_.push(
+        std::unique_ptr<BreakpointSite>(
+            new BreakpointSite(*this, parent, id, address, hardware, internal)
+        )
+    );
 }
 
 std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t amount) const {

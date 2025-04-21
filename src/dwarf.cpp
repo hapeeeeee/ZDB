@@ -871,7 +871,7 @@ namespace zdb {
                     children.end(),
                     [=](auto& child) {
                         return child.abbrev_entry()->tag == DW_TAG_inlined_subroutine 
-                            && child.contains_address(address);
+                            && child.contains_file_address(address);
                     }
                 );
 

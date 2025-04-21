@@ -9,12 +9,28 @@ namespace {
     }
 }
 
-zdb::BreakpointSite::BreakpointSite(zdb::Process& proc, zdb::VirtualAddr address, bool is_internal, bool is_hardware)
-    : is_internal_(is_internal),  is_hardware_(is_hardware), 
+zdb::BreakpointSite::BreakpointSite(
+    zdb::Process& proc, 
+    zdb::VirtualAddr address, 
+    bool is_internal, 
+    bool is_hardware
+): is_internal_(is_internal),  is_hardware_(is_hardware), 
     proc_(&proc), address_(address), is_enabled_(false), saved_data_{}
 {
     id_ = is_internal_ ? -1 : get_next_id();
 }
+
+zdb::BreakpointSite::BreakpointSite(
+    zdb::Process& proc, 
+    zdb::Breakpoint* parent,
+    id_type id, 
+    zdb::VirtualAddr address, 
+    bool is_internal, 
+    bool is_hardware
+)
+    : parent_(parent), id_(id), is_internal_(is_internal),  is_hardware_(is_hardware), 
+    proc_(&proc), address_(address), is_enabled_(false), saved_data_{}
+{}
 
 void zdb::BreakpointSite::enable() {
     if (is_enabled_) {
