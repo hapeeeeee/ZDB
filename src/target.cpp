@@ -227,3 +227,45 @@ zdb::Target::find_functions_result zdb::Target::find_functions(std::string name)
     }
     return result;
 }
+
+namespace zdb {
+    Breakpoint& Target::create_address_breakpoint(
+        VirtualAddr address,
+        bool internal,
+        bool hardware
+    ) {
+        return breakpoints_.push(
+            std::unique_ptr<AddressBreakpoint>(
+                new AddressBreakpoint(*this, address, internal, hardware)
+            )
+        );
+    }
+
+    Breakpoint& Target::create_function_breakpoint(
+        std::string function_name,
+        bool internal,
+        bool hardware
+    ) {
+        return breakpoints_.push(
+            std::unique_ptr<FunctionBreakpoint>(
+                new FunctionBreakpoint(*this, function_name, internal, hardware)
+            )
+        );
+    }
+
+    Breakpoint& Target::create_line_breakpoint(
+        std::filesystem::path file, 
+        std::size_t line,
+        bool internal,
+        bool hardware
+    ) {
+        return breakpoints_.push(
+            std::unique_ptr<LineBreakpoint>(
+                new LineBreakpoint(*this, file, line, internal, hardware)
+            )
+        );
+    }
+
+};
+
+        

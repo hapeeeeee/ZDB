@@ -13,6 +13,7 @@
 #include <libzdb/process.hpp>
 #include <libzdb/elf.hpp>
 #include <libzdb/stack.hpp>
+#include <libzdb/breakpoint.hpp>
 
 
 namespace zdb {
@@ -35,7 +36,6 @@ namespace zdb {
         Stack& get_stack() { return stack_; }
         const Stack& get_stack() const { return stack_; }
 
-
         FileAddr get_pc_file_address() const;
         void notify_stop(const StopReason& reason);
 
@@ -55,6 +55,26 @@ namespace zdb {
         find_functions_result find_functions(std::string name) const;
 
 
+        Breakpoint& create_address_breakpoint(
+            VirtualAddr address,
+            bool internal = false,
+            bool hardware = false 
+        );
+        Breakpoint& create_function_breakpoint(
+            std::string function_name,
+            bool internal = false,
+            bool hardware = false 
+        );
+        Breakpoint& create_line_breakpoint(
+            std::filesystem::path file, 
+            std::size_t line,
+            bool internal = false,
+            bool hardware = false 
+        );
+
+        StoppointCollection<Breakpoint>& breakpoints() { return breakpoints_; }
+        const StoppointCollection<Breakpoint>& breakpoints() const { return breakpoints_; }
+
       private:
         Target(std::unique_ptr<Process> process, std::unique_ptr<ELF> elf)
         : process_(std::move(process)), elf_(std::move(elf)), stack_(this) {}
@@ -63,6 +83,8 @@ namespace zdb {
         std::unique_ptr<Process> process_;
         std::unique_ptr<ELF> elf_;
         Stack stack_;
+        StoppointCollection<Breakpoint> breakpoints_;
+
     };
 }
 

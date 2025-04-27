@@ -8,7 +8,7 @@
 
 namespace zdb {
 
-     template <class I>
+    template <class I>
     std::optional<I> to_integral(std::string_view sv, int base = 10) {
         auto begin = sv.begin();
         if (base == 16

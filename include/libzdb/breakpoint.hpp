@@ -111,8 +111,8 @@ namespace zdb {
         AddressBreakpoint(
             Target& tgt, 
             VirtualAddr address,
-            bool is_hardware = false, 
-            bool is_internal = false
+            bool is_internal = false,
+            bool is_hardware = false
         ): Breakpoint(tgt, is_hardware, is_internal), address_(address) {
             resolve();
         }

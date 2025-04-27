@@ -299,46 +299,136 @@ namespace {
         }
     }
 
-    void handle_breakpoint_list_command(zdb::Process &process) {
-        if (process.breakpoint_sites().empty()) {
+    void handle_breakpoint_list_command(zdb::Target& target) {
+        if (target.breakpoints().empty()) {
             fmt::print("No breakpoints set\n");
             return;
         }
 
         fmt::print("Current Breakpoints:\n");
-        process.breakpoint_sites().for_each(
-            [&](auto &site) {
-                if (site->is_internal()) return;
-                fmt::print("{}: address = {:#x}, enabled = {}\n", 
-                    site->id(), 
-                    site->address().addr(), 
-                    site->is_enabled() ? "enabled" : "disabled"
+        target.breakpoints().for_each(
+            [&](auto &bp) {
+                if (bp->is_internal()) return;
+                fmt::print("{}: ", bp->id());
+                if (auto func_bp = dynamic_cast<zdb::FunctionBreakpoint*>(bp.get())) {
+                    fmt::print("function = {}", func_bp->function_name());
+                } else if (auto line_bp = dynamic_cast<zdb::LineBreakpoint*>(bp.get())) {
+                    fmt::print("file = {}, line = {}",
+                        line_bp->file().string(), 
+                        line_bp->line()
+                    );
+                } else if (auto addr_bp = dynamic_cast<zdb::AddressBreakpoint*>(bp.get())) {
+                    fmt::print("address = {:#x}", addr_bp->address().addr());
+                }
+                fmt::print(", {}:\n", bp->is_enabled() ? "enabled" : "disabled");
+                bp->breakpoint_sites().for_each(
+                    [&](auto& site) {
+                        fmt::print(" .{}: address = {:#x}, {}\n",
+                            site->id(), 
+                            site->address().addr(),
+                            site->is_enabled() ? "enabled" : "disabled"
+                        );
+                    }
                 );
             }
         );
     }
 
-    void handle_breakpoint_set_command(zdb::Process &process, const std::vector<std::string> &args) {
-        auto address = zdb::to_integral<std::uint64_t>(args[2], 16);
-        if (!address) {
-            fmt::print(
-                stderr,
-                "Breakpoint command expects address in hexadecimal, prefixed with '0x'\n"
-            );
-            return;
-        }
-
+    void handle_breakpoint_set_command(zdb::Target &target, const std::vector<std::string> &args) {
         bool is_hardware = false;
         if (args.size() == 4) {
             if (args[3] == "-h") is_hardware = true;
             else zdb::Error::send("Invalid argument");
         }
 
-        process.create_breakpoint_site(zdb::VirtualAddr(address.value()), is_hardware = is_hardware).enable();
-        fmt::print("Breakpoint set at {:#x}\n", address.value());
+        if (args[2].find("0x") == 0) {
+            std::optional<std::uint64_t> address = zdb::to_integral<std::uint64_t>(args[2], 16);
+            if (!address) {
+                fmt::print(
+                    stderr,
+                    "Breakpoint command expects address in hexadecimal, prefixed with '0x'\n"
+                );
+                return;
+            }
+            target.create_address_breakpoint(
+                zdb::VirtualAddr{ *address }, 
+                false, 
+                is_hardware
+            ).enable();
+        } 
+        else if (args[2].find(':') != std::string::npos) {
+            std::vector<std::string> data = split(args[2], ':');
+            std::string path = data[0];
+            std::optional<std::uint64_t> line = zdb::to_integral<std::uint64_t>(data[1]);
+            if (!line) {
+                fmt::print(
+                    stderr,
+                    "Line number should be an integer\n"
+                );
+                return;
+            }
+            target.create_line_breakpoint(
+                path, 
+                *line, 
+                false, 
+                is_hardware
+            ).enable();
+        }
+        else {
+            target.create_function_breakpoint(args[2]).enable();
+        }
+
     }
 
-    void handle_breakpoint_command(zdb::Process &process, const std::vector<std::string> &args) {
+    void handle_breakpoint_toggle(zdb::Target& target, const std::vector<std::string>& args) {
+        std::string sub_command = args[1]; // enable/disable
+        std::string bp_id_with_site_id = args[2]; // bp enbale 1.2
+
+        std::size_t dot_pos = bp_id_with_site_id.find('.');
+        std::string id_str = args[2].substr(0, dot_pos);
+        std::optional<int> id = zdb::to_integral<zdb::Breakpoint::id_type>(id_str);
+        if (!id) {
+            std::cerr << "Command expects breakpoint id";
+            return;
+        }
+
+        zdb::Breakpoint& bp = target.breakpoints().get_by_id(*id);
+        if (dot_pos != std::string::npos) {
+            std::string site_id_str = bp_id_with_site_id.substr(dot_pos + 1);
+            std::optional<int> site_id = zdb::to_integral<zdb::BreakpointSite::id_type>(site_id_str);
+            if (!site_id) {
+                std::cerr << "Command expects breakpoint site id";
+                return;
+            }
+
+            if (is_prefix(sub_command, "enable")) {
+                bp.breakpoint_sites().get_by_id(*site_id).enable();
+            }
+            else if (is_prefix(sub_command, "disable")) {
+                bp.breakpoint_sites().get_by_id(*site_id).disable();
+            }
+        }
+        else if (is_prefix(sub_command, "enable")) {
+            bp.enable();
+        }
+        else if (is_prefix(sub_command, "disable")) {
+            bp.disable();
+        }
+        else if (is_prefix(sub_command, "delete")) {
+            bp.breakpoint_sites().for_each(
+                [&](auto& site) {
+                    target.get_process()
+                        .breakpoint_sites()
+                        .remove_by_address(site->address());
+                }   
+            );
+            target.breakpoints().remove_by_id(*id);
+        }
+
+
+    }
+
+    void handle_breakpoint_command(zdb::Target& target, const std::vector<std::string>& args) {
         if (args.size() < 2) {
             print_help({"help", "breakpoint"});
             return;
@@ -346,7 +436,7 @@ namespace {
 
         auto sub_command = args[1];
         if (is_prefix(sub_command, "list")) {
-            handle_breakpoint_list_command(process);
+            handle_breakpoint_list_command(target);
             return;
         } 
         
@@ -355,26 +445,28 @@ namespace {
             return;
         }
         if (is_prefix(sub_command, "set")) {    
-            handle_breakpoint_set_command(process, args);
+            handle_breakpoint_set_command(target, args);
             return;
         } 
 
-        auto bp_id = zdb::to_integral<std::uint64_t>(args[2], 10);
-        if (!bp_id) {
-            fmt::print(
-                stderr,
-                "Breakpoint command expects breakpoint id\n"
-            );
-            return;
-        }
+        handle_breakpoint_toggle(target, args);
 
-        if (is_prefix(sub_command, "enable")) {
-            process.breakpoint_sites().get_by_id(bp_id.value()).enable();
-        } else if (is_prefix(sub_command, "disable")) {
-            process.breakpoint_sites().get_by_id(bp_id.value()).disable();
-        } else if (is_prefix(sub_command, "delete")) {
-            process.breakpoint_sites().remove_by_id(bp_id.value());
-        } 
+        // auto bp_id = zdb::to_integral<std::uint64_t>(args[2], 10);
+        // if (!bp_id) {
+        //     fmt::print(
+        //         stderr,
+        //         "Breakpoint command expects breakpoint id\n"
+        //     );
+        //     return;
+        // }
+
+        // if (is_prefix(sub_command, "enable")) {
+        //     process.breakpoint_sites().get_by_id(bp_id.value()).enable();
+        // } else if (is_prefix(sub_command, "disable")) {
+        //     process.breakpoint_sites().get_by_id(bp_id.value()).disable();
+        // } else if (is_prefix(sub_command, "delete")) {
+        //     process.breakpoint_sites().remove_by_id(bp_id.value());
+        // } 
     }
 
     /// memory read addr size
@@ -602,7 +694,7 @@ namespace {
         } else if (is_prefix(command, "register")) {
             handle_register_command(*process, args);
         } else if (is_prefix(command, "breakpoint")) {
-            handle_breakpoint_command(*process, args);
+            handle_breakpoint_command(*target, args);
         } else if (is_prefix(command, "stepi")) {
             auto stop_reason = process->step();
             handle_stop(*target, stop_reason);
@@ -615,8 +707,7 @@ namespace {
         } else if (is_prefix(command, "step")) {
             auto reason = target->step_in();
             handle_stop(*target, reason);
-        }
-        else if (is_prefix(command, "memory")) {
+        } else if (is_prefix(command, "memory")) {
             handle_memory_command(*process, args);
         } else if (is_prefix(command, "disassemble")) {
             handle_disassemble_command(*process, args);
