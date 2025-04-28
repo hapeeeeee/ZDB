@@ -11,6 +11,10 @@
 #include <cctype>
 #include <libzdb/target.hpp>
 #include <libzdb/elf.hpp>
+#include <fstream>
+#include <filesystem>
+#include <cmath>
+
 namespace {
     zdb::Process *g_zdb_process = nullptr;
     void handle_sigint(int) {
@@ -129,22 +133,23 @@ namespace {
 
     std::string get_signal_stop_reason(const zdb::Target &target, zdb::StopReason &stop_reason) {
         auto& process = target.get_process();
+        auto pc = process.get_pc();
 
         std::string message = fmt::format(
-            "stopped with signal {} at {:#x}", 
+            "stopped with signal {} at {:#x}",
             sigabbrev_np(stop_reason.info), 
-            process.get_pc().addr()
+            pc.addr()
         );
 
-        auto func = target
-            .get_elf()
-            .get_symbol_containing_virt_addr(process.get_pc());
-        
-        if (func && ELF64_ST_TYPE(func.value()->st_info) == STT_FUNC) {
-            message += fmt::format(
-                " ({})", 
-                target.get_elf().get_general_str_from_strtab(func.value()->st_name)
-            );
+        zdb::LineTable::iterator line = target.line_entry_at_pc();
+        if (line != zdb::LineTable::iterator()) {
+            std::string file = line->file_entry->path.filename().string();
+            message += fmt::format(", {}:{}", file, line->line);
+        }
+
+        auto func_name = target.function_name_at_address(pc);
+        if (func_name != "") {
+            message += fmt::format(" ({})", func_name);
         }
 
         if (stop_reason.info == SIGTRAP) {
@@ -669,14 +674,63 @@ namespace {
         }
     }
 
+    void print_source(
+        const std::filesystem::path& path, 
+        std::uint64_t line,
+        std::uint64_t n_lines_context
+    ) {
+        std::ifstream file{ path.string() };
+        auto start_line = line <= n_lines_context ? 1 : line - n_lines_context;
+        auto end_line = line + n_lines_context + 1;
+        
+        char c{};
+        auto current_line = 1u;
+        while (current_line != start_line && file.get(c)) {
+            if (c == '\n') {
+                ++current_line;
+            }
+        }
+
+        auto print_line_start = [&](auto current_line) {
+            auto fill_width = static_cast<int>(std::floor(std::log10(end_line))) + 1;
+            auto arrow = current_line == line ? ">" : " ";
+            fmt::print("{} {:>{}} ", arrow, current_line, fill_width);
+        };
+
+        print_line_start(current_line);
+        while (current_line <= end_line && file.get(c)) {
+            std::cout << c;
+            if (c == '\n') {
+                ++current_line;
+                print_line_start(current_line);
+            }
+        }
+        std::cout << std::endl;
+
+    }
+
     void handle_stop(zdb::Target &target, zdb::StopReason &stop_reason) {
         print_stop_reason(target, stop_reason);
         if (stop_reason.reason == zdb::ProcessState::Stopped) {
-            print_disassembly(
-                target.get_process(), 
-                target.get_process().get_pc(), 
-                5
-            );
+            if (target.get_stack().inline_height() > 0) {
+                auto stack = target.get_stack().inline_stack_at_pc();
+                auto frame = stack[stack.size() - target.get_stack().inline_height()];
+                print_source(frame.file().path, frame.line(), 3);
+            }
+            else if (
+                auto entry = target.line_entry_at_pc();
+                entry != zdb::LineTable::iterator()
+            ) {
+                print_source(entry->file_entry->path, entry->line, 3);
+            } 
+            else {
+                print_disassembly(
+                    target.get_process(), 
+                    target.get_process().get_pc(), 
+                    5
+                );
+            }
+            
         }
     }
 

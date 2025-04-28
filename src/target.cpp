@@ -2,6 +2,8 @@
 #include <libzdb/elf.hpp>
 #include <optional>
 #include <libzdb/disassembler.hpp>
+#include <cxxabi.h>
+
 
 namespace {
     std::unique_ptr<zdb::ELF> create_loaded_elf(
@@ -264,6 +266,30 @@ namespace zdb {
                 new LineBreakpoint(*this, file, line, internal, hardware)
             )
         );
+    }
+
+    std::string Target::function_name_at_address(VirtualAddr address) const {
+        FileAddr file_address = address.to_file_addr(*elf_);
+        const ELF* obj = file_address.elf();
+        if (!obj) return "";
+
+        std::optional<DIE> func = obj->get_dwarf().function_containing_address(file_address);
+        if (func && func->name()) {
+            return std::string{func->name().value()};
+        }
+        else if (
+            std::optional<const Elf64_Sym*> elf_func = obj->get_symbol_at_file_addr(file_address);
+            elf_func && ELF64_ST_TYPE(elf_func.value()->st_info) == STT_FUNC
+        ) {
+            std::string elf_name = std::string{ obj->get_general_str_from_strtab(elf_func.value()->st_name) };
+            return abi::__cxa_demangle(
+                elf_name.c_str(),
+                nullptr,
+                nullptr,
+                nullptr
+            );
+        }
+        return "";
     }
 
 };

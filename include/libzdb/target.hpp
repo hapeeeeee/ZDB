@@ -75,6 +75,8 @@ namespace zdb {
         StoppointCollection<Breakpoint>& breakpoints() { return breakpoints_; }
         const StoppointCollection<Breakpoint>& breakpoints() const { return breakpoints_; }
 
+        std::string function_name_at_address(VirtualAddr address) const;
+
       private:
         Target(std::unique_ptr<Process> process, std::unique_ptr<ELF> elf)
         : process_(std::move(process)), elf_(std::move(elf)), stack_(this) {}
