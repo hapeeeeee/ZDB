@@ -8,6 +8,106 @@
  #include <iostream>
 
 namespace {
+    std::uint64_t parse_eh_frame_pointer_with_base(Cursor& cur, std::uint8_t encoding, std::uint64_t base);
+
+    // In the EH format, CIEs consist of 10 fields:
+    //  - length (std::uint32_t) The byte size of this CIE, not including the length field itself.
+    //  - CIE_id (std::uint32_t) Distinguishes CIEs from FDEs. The DWARF standard specifies this field 
+    //      to be 0xffffffff for CIEs, but the EH format specifies it to be 0.
+    //  - version (std::uint8_t) The version of the call frame information that this CIE is representing. 
+    //      For formats based on DWARF 2, this is 1, for formats based on DWARF 3, it is 3, and for formats 
+    //      based on DWARF 4, it is 4.
+    //  - augmentation_string (null-terminated string) ABI-specific augmentations. I’ll detail the options 
+    //      that the EH format specifies momentarily. augmentation_string field may have the following specifiers:
+    //      - z Indicates that there is a ULEB128 specifying the size of the augmentation data (not including 
+    //          the ULEB128 itself). If there is augmentation data, this must be the first entry in it.
+    //      - L Indicates that there is a byte specifying the encoding of a pointer to additional information 
+    //          for exception handling routines called the language-specific data area (LSDA). We won’t use 
+    //          this pointer in our debugger.
+    //      - R Indicates that there is a byte specifying the encoding of FDE code pointers for linked FDEs.
+    //      - P Indicates that there is a byte specifying the encoding of a pointer, followed by the encoded 
+    //          pointer itself, which indicates a personality function used to handle language-specific tasks 
+    //          by exception handling routines. We won’t use this pointer in our debugger.
+    //  - address_size (std::uint8_t) The byte size of an address on the target machine. On x64, this is 8. 
+    //      This field is present only in CIEs based on DWARF 4 and up.
+    //  - segment_size (std::uint8_t) The byte size of segment selectors on the target machine. On x64, 
+    //      this is 0. This field is present only in CIEs based on DWARF 4 and up.
+    //  - code_alignment_factor (ULEB128) Tunes the behavior of certain CFI instructions.
+    //  - data_alignment_factor (SLEB128) Tunes the behavior of certain CFI instructions.
+    //  - return_address_register (std::uint8_t in DWARF 2, ULEB128 otherwise) The DWARF register number 
+    //      for the register that stores the return address. On x64, this will be register 16, which is a 
+    //      made-up register number specifically for return addresses, but which we’ve assigned to rip so
+    //      that restoring rip is like returning from a function. 
+    //  - augmentation_data (array of std::uint8_t values) Stores data that is outlined in the 
+    //      augmentation_string field. This field is present only in the EH format, not in DWARF.
+    //  - initial_instructions (array of std::uint8_t values) A sequence of CFI instructions that specify 
+    //      how to unwind the stack and are prepended to all FDEs linked to this CIE.
+    zdb::CallFrameInformation::common_information_entry parse_cie(Cursor cur) {
+        const std::byte * start = cur.position();
+        uint32_t length = cur.u32() + 4;
+        uint32_t id = cur.u32();
+        uint8_t version = cur.u8();
+        if (!(version == 1 || version == 3 || version == 4)) {
+            zdb::Error::send("Invalid CIE version");
+        }
+
+        std::string_view augmentation = cur.string();
+        if (!augmentation.empty() && augmentation[0] != 'z') {
+            zdb::Error::send("Invalid CIE augmentation");
+        }
+
+        if (version == 4) {
+            auto address_size = cur.u8();
+            auto segment_size = cur.u8();
+            if (address_size != 8)
+                zdb::Error::send("Invalid address size");
+            if (segment_size != 0)
+                zdb::Error::send("Invalid segment size");
+        }
+
+        auto code_alignment_factor = cur.uleb128();
+        auto data_alignment_factor = cur.sleb128();
+        auto return_address_register = 
+            version == 1 ? cur.u8() : cur.uleb128();
+        
+        // By default, an FDE code pointer’s encoding uses an absolute 64-bit address.
+        std::uint8_t fde_pointer_encoding = DW_EH_PE_udata8 | DW_EH_PE_absptr;
+        for (char c : augmentation) {
+            switch (c) {
+            case 'z': {
+                cur.uleb128();
+                break;
+            }
+            case 'R': {
+                fde_pointer_encoding = cur.u8(); 
+                break;
+            }
+            case 'L': {
+                cur.u8(); 
+                break;
+            }
+            case 'P': {
+                auto encoding = cur.u8();
+                (void)parse_eh_frame_pointer_with_base(cur, encoding, 0);
+                break;
+            }
+            default: zdb::Error::send("Invalid CIE augmentation");
+            }
+        }
+
+        zdb::Span<const std::byte> instructions = { cur.position(), start + length };
+        bool fde_has_augmentation = !augmentation.empty();
+        return { 
+            length, 
+            code_alignment_factor,
+            data_alignment_factor, 
+            fde_has_augmentation,
+            fde_pointer_encoding, 
+            instructions 
+        };
+
+    }
+
     // 12. file_names (a sequence of file entries) The source files involved in this compilation. 
     //      Each entry contains the following: 
     //        - a null-terminated string representing the filename, either as an absolute path, 
@@ -267,6 +367,22 @@ namespace {
         }
         auto start = std::next(lhs.begin(), lhs_size - rhs_size);
         return std::equal(start, lhs.end(), rhs.begin());
+    }
+}
+
+// For CallFrameInfo
+namespace zdb {
+    const CallFrameInformation::common_information_entry& CallFrameInformation::get_cie(FileOffset at) const {
+        uint64_t offset = at.off();
+        if (cie_map_.count(offset)) {
+            return cie_map_.at(offset);
+        }
+
+        Span<const std::byte> section = at.elf()->get_section_contents_by_name(".eh_frame");
+        Cursor cur({ at.elf()->file_offset_as_data_pointer(at), section.end()});
+        auto cie = parse_cie(cur);
+        cie_map_.emplace(offset, cie);
+        return cie_map_.at(offset);
     }
 }
 

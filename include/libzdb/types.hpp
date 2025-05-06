@@ -70,7 +70,7 @@ namespace zdb {
             std::uint64_t off() const {
                 return offset_;
             }
-            const ELF* elf_file() const {
+            const ELF* elf() const {
                 return elf_;
             }
 

@@ -103,7 +103,7 @@ namespace {
         std::int64_t s64() { return fixed_int<std::int64_t>(); }
 
         std::string_view string() {
-            auto null_terminator = std::find(pos_, data_.end(), std::byte{0});
+            const std::byte* null_terminator = std::find(pos_, data_.end(), std::byte{0});
             std::string_view ret(reinterpret_cast<const char*>(pos_), null_terminator - pos_);
             pos_ = null_terminator + 1;
             return ret;
@@ -153,7 +153,34 @@ namespace zdb {
     class ELF;
     class Dwarf;
     class RangeList;
-  
+
+// ----------------------------------- For `.eh_frame` ------------------------------------------------------//
+    class CallFrameInformation {
+      public:
+        struct common_information_entry {
+            std::uint32_t length;
+            std::uint64_t code_alignment_factor;
+            std::int64_t data_alignment_factor;
+            bool fde_has_augmentation;
+            std::uint8_t fde_pointer_encoding;
+            Span<const std::byte> instructions;
+        };
+
+        CallFrameInformation() = delete;
+        CallFrameInformation(const CallFrameInformation&) = delete;
+        CallFrameInformation& operator=(const CallFrameInformation&) = delete;
+
+        const Dwarf& dwarf() const { return *dwarf_; }
+
+        const common_information_entry& get_cie(FileOffset at) const;
+
+      private:
+        const Dwarf* dwarf_;
+
+      private:
+        mutable std::unordered_map<std::uint32_t, common_information_entry> cie_map_;
+    };
+      
 // ----------------------------------- For `.debug_line ` -------------------------------------------------- //
     class LineTable {
       public:
