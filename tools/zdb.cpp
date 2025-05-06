@@ -714,7 +714,7 @@ namespace {
         if (stop_reason.reason == zdb::ProcessState::Stopped) {
             if (target.get_stack().inline_height() > 0) {
                 auto stack = target.get_stack().inline_stack_at_pc();
-                auto frame = stack[stack.size() - target.get_stack().inline_height()];
+                zdb::DIE frame = stack[stack.size() - target.get_stack().inline_height()];
                 print_source(frame.file().path, frame.line(), 3);
             }
             else if (
@@ -749,6 +749,9 @@ namespace {
             handle_register_command(*process, args);
         } else if (is_prefix(command, "breakpoint")) {
             handle_breakpoint_command(*target, args);
+        } else if (is_prefix(command, "step")) {
+            auto reason = target->step_in();
+            handle_stop(*target, reason);
         } else if (is_prefix(command, "stepi")) {
             auto stop_reason = process->step();
             handle_stop(*target, stop_reason);
@@ -757,9 +760,6 @@ namespace {
             handle_stop(*target, reason);
         } else if (is_prefix(command, "finish")) {
             auto reason = target->step_out();
-            handle_stop(*target, reason);
-        } else if (is_prefix(command, "step")) {
-            auto reason = target->step_in();
             handle_stop(*target, reason);
         } else if (is_prefix(command, "memory")) {
             handle_memory_command(*process, args);
