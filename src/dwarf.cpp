@@ -8,7 +8,52 @@
  #include <iostream>
 
 namespace {
-    std::uint64_t parse_eh_frame_pointer_with_base(Cursor& cur, std::uint8_t encoding, std::uint64_t base);
+    std::uint64_t parse_eh_frame_pointer_with_base(
+        Cursor& cur, 
+        std::uint8_t encoding, 
+        std::uint64_t base
+    ) {
+        switch (encoding & 0x0f) {
+        case DW_EH_PE_absptr: return base + cur.u64();
+        case DW_EH_PE_uleb128: return base + cur.uleb128();
+        case DW_EH_PE_udata2: return base + cur.u16();
+        case DW_EH_PE_udata4: return base + cur.u32();
+        case DW_EH_PE_udata8: return base + cur.u64();
+        case DW_EH_PE_sleb128: return base + cur.sleb128();
+        case DW_EH_PE_sdata2: return base + cur.s16();
+        case DW_EH_PE_sdata4: return base + cur.s32();
+        case DW_EH_PE_sdata8: return base + cur.s64();
+        default: zdb::Error::send("Unknown eh_frame pointer encoding");
+        }
+    }
+
+    std::uint64_t parse_eh_frame_pointer(
+        const zdb::ELF& elf,
+        Cursor& cur, 
+        std::uint8_t encoding,
+        std::uint64_t pc, 
+        std::uint64_t text_section_start,
+        std::uint64_t data_section_start, 
+        std::uint64_t func_start
+    ) {
+        std::uint64_t base = 0;
+        // We mask out the most significant bit (0x80) because it corresponds to the 
+        // indirect encoding scheme, which we don’t need to handle
+        switch (encoding & 0x70) {
+        case DW_EH_PE_absptr: break;
+        case DW_EH_PE_pcrel:
+            base = pc; break;
+        case DW_EH_PE_textrel:
+            base = text_section_start; break;
+        case DW_EH_PE_datarel:
+            base = data_section_start; break;
+        case DW_EH_PE_funcrel:
+            base = func_start; break;
+        default: zdb::Error::send("Unknown eh_frame pointer encoding");
+        }
+
+        return parse_eh_frame_pointer_with_base(cur, encoding, base);
+    }
 
     // In the EH format, CIEs consist of 10 fields:
     //  - length (std::uint32_t) The byte size of this CIE, not including the length field itself.
