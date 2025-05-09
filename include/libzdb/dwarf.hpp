@@ -154,9 +154,39 @@ namespace zdb {
     class Dwarf;
     class RangeList;
 
-// ----------------------------------- For `.eh_frame` ------------------------------------------------------//
+// ----------------------------------- For `.eh_frame` and `.eh_frame_hdr` ------------------------//
     class CallFrameInformation {
       public:
+        //          +-------------------+
+        //          |       CIE         |
+        //          |-------------------|
+        //          | Common settings:  |
+        //          | - Stack direction |
+        //          | - Initial CFA rule|
+        //          | - Return reg info |
+        //          | - Encoding format |
+        //          +---------+---------+
+        //                    ^
+        //    ----------------|----------------
+        //    |               |               |
+        //+---------+   +------------+   +------------+
+        //|   FDE1  |   |    FDE2    |   |    FDE3    |
+        //|---------|   |------------|   |------------|
+        //| Code    |   | Code       |   | Code       |
+        //| range   |   | range      |   | range      |
+        //| CFA     |   | CFA rules  |   | CFA rules  |
+        //| rules   |   | (specific) |   | (specific) |
+        //+---------+   +------------+   +------------+
+
+
+        // CIE (Common Information Entry):
+        // A shared entry that contains common unwinding information 
+        // used by multiple functions. It defines general rules such as:
+        //   - Stack growth direction
+        //   - Initial Canonical Frame Address (CFA) rule
+        //   - Encoding format for call frame instructions
+        //   - Default register saving/restoration rules
+        // FDEs reference a CIE to inherit these common settings.
         struct common_information_entry {
             std::uint32_t length;
             std::uint64_t code_alignment_factor;
@@ -164,6 +194,34 @@ namespace zdb {
             bool fde_has_augmentation;
             std::uint8_t fde_pointer_encoding;
             Span<const std::byte> instructions;
+        };
+
+        // FDE (Frame Description Entry):
+        // A specific entry describing how to unwind the stack for a 
+        // particular function or code range.
+        // It contains:
+        //   - Function address range (PC start and length)
+        //   - Offset to the associated CIE
+        //   - Function-specific CFA and register recovery rules
+        // This allows proper stack unwinding during exceptions or debugging.
+        struct frame_description_entry {
+          std::uint32_t length;
+          const common_information_entry* cie;
+          FileAddr initial_location;
+          std::uint64_t address_range;
+          Span<const std::byte> instructions;
+        };
+
+        // `.eh_frame_hdr` contains a fast lookup table for FDEs.
+        struct eh_hdr {
+          const std::byte* start; // a pointer to the start of the .eh_frame_hdr section
+          const std::byte* search_table; // a pointer to the start of the search table
+          std::size_t count;  // the number of entries in search table
+          std::uint8_t encoding; // entries’ encoding
+          CallFrameInformation* parent;
+          const std::byte* operator[](FileAddr address) const;  // takes an instruction’s object file offset 
+                                                                // returns a pointer to the start of the FDE
+                                                                // for that instruction.
         };
 
         CallFrameInformation() = delete;

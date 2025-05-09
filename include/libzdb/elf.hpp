@@ -62,6 +62,13 @@ class ELF {
         std::string_view get_section_name_from_shstrtab(std::size_t index) const;
         std::string_view get_general_str_from_strtab(std::size_t index) const;
 
+        FileOffset data_pointer_as_file_offset(const std::byte* ptr) const {
+            return FileOffset(*this, ptr - data_);
+        }
+        const std::byte* file_offset_as_data_pointer(FileOffset offset) const {
+            return data_ + offset.off();
+        }
+
     private:
         int fd_;
         std::filesystem::path path_;

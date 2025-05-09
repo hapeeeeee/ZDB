@@ -55,6 +55,44 @@ namespace {
         return parse_eh_frame_pointer_with_base(cur, encoding, base);
     }
 
+    // The .eh_frame_hdr section contains a binary search table that maps addresses
+    // to offsets of the FDEs that store the corresponding unwind information.
+    // The section consists of seven fields:
+    //  - version (std::uint8_t) The version of the .eh_frame_hdr format (mustbe 1).
+    //  - eh_frame_ptr_enc (std::uint8_t) The encoding format of the eh_frame_ptr field.
+    //  - fde_count_enc (std::uint8_t) The encoding format of the fde_count field.
+    //  - table_enc (std::uint_8_t) The encoding format of the entries in the binary search table. 
+    //      This will always be a fixed-size encoding (that is, not ULEB128) because otherwise 
+    //      jumping to arbitrary entries would not be possible.
+    //  - eh_frame_ptr (encoded pointer) A pointer to the start of the .eh_frame section.
+    //  - fde_count (encoded integer) The number of entries in the binary search table. This will 
+    //      always be an absolute encoding. 
+    //  - binary_search_table (array of integers encoded according to the table_enc field) A table 
+    //      containing the number of entries given by the fde_count field. Each entry of the table 
+    //      corresponds to a single FDE and consists of two encoded integers: the value of the 
+    //      initial_location field for the FDE and the offset of the FDE from the start of the object
+    //      file. The entries are sorted in an ascending order by the initial_location value.
+    zdb::CallFrameInformation::eh_hdr parse_eh_hdr(zdb::Dwarf& dwarf) {
+        auto elf = dwarf.elf();
+        auto eh_hdr_start = *elf->get_section_start_file_addr_by_name(".eh_frame_hdr");
+        auto text_section_start = *elf->get_section_start_file_addr_by_name(".text");
+        auto eh_hdr_data = elf->get_section_contents_by_name(".eh_frame_hdr");
+        Cursor cur(eh_hdr_data);
+        auto start = cur.position();
+        auto version = cur.u8();
+        auto eh_frame_ptr_enc = cur.u8();
+        auto fde_count_enc = cur.u8();
+        auto table_enc = cur.u8();
+
+        // We don’t really need this value, as we can easily retrieve the pointer from sdb::elf, so
+        // we throw away the encoded pointer
+        (void)parse_eh_frame_pointer_with_base(cur, eh_frame_ptr_enc, 0);
+        
+        uint64_t fde_count = parse_eh_frame_pointer_with_base(cur, fde_count_enc, 0);
+        auto search_table = cur.position();
+        return { start, search_table, fde_count, table_enc, nullptr };
+    }
+
     // In the EH format, CIEs consist of 10 fields:
     //  - length (std::uint32_t) The byte size of this CIE, not including the length field itself.
     //  - CIE_id (std::uint32_t) Distinguishes CIEs from FDEs. The DWARF standard specifies this field 
@@ -151,6 +189,65 @@ namespace {
             instructions 
         };
 
+    }
+
+    // FDEs consist of only 6 fields:
+    //  - length (std::uint32_t) The byte size of this FDE, not including the length field itself.
+    //  - CIE_id (std::int32_t) The negative distance from the current parse position to the linked 
+    //      CIE. For example, a value of 40 means that the CIE starts at 40 bytes before the current 
+    //      parse position.
+    //  - initial_location (encoded pointer) A pointer to the first instruction to which this FDE 
+    //      applies. The encoding for this pointer is given by the R augmentation of the linked CIE 
+    //      and defaults to 64-bit absolute values if there is no R augmentation.
+    //  - address_range (encoded integer) The byte size of the code to which this FDE applies. The 
+    //      encoding for this pointer is given by the R augmentation of the linked CIE and defaults 
+    //      to 64-bit absolute values if there is no R augmentation. However, this value should 
+    //      always be interpreted as an absolute integer value, even if the R augmentation says it 
+    //      should be relative to some base address.
+    //  - augmentation_data (array of std::uint8_t) Stores data that is outlined in the linked CIE’s 
+    //      augmentation_string field. This field is present only in the EH format, not DWARF.
+    //  - instructions (array of std::uint8_t) A sequence of call frame information instructions that 
+    //      specify how to unwind the stack
+    zdb::CallFrameInformation::frame_description_entry 
+    parse_fde(const zdb::CallFrameInformation& cfi, Cursor cur) {
+        auto start = cur.position();
+        auto length = cur.u32() + 4;
+        auto elf = cfi.dwarf().elf();
+        auto current_offset = elf->data_pointer_as_file_offset(cur.position());
+        zdb::FileOffset cie_offset { *elf, current_offset.off() - cur.s32() /* CIE_id */ };
+        auto& cie = cfi.get_cie(cie_offset);
+
+        current_offset = elf->data_pointer_as_file_offset(cur.position());
+        zdb::FileAddr text_section_start = elf
+            ->get_section_start_file_addr_by_name(".text")
+            .value_or(zdb::FileAddr{});
+        auto initial_location_addr = parse_eh_frame_pointer(
+            *elf,
+            cur,
+            cie.fde_pointer_encoding, 
+            current_offset.off(),
+            text_section_start.addr(), 
+            0, 
+            0
+        );
+        zdb::FileAddr initial_location{ *elf, initial_location_addr };
+        // While also encoded according to the R augmentation in the linked CIE, 
+        // only the low 4 bits are used for address_range, so we can call 
+        // `parse_eh_frame_pointer_with_base` rather than `parse_eh_frame_pointer` 
+        // to handle it.
+        auto address_range = parse_eh_frame_pointer_with_base(
+            cur, 
+            cie.fde_pointer_encoding, 
+            0
+        );
+
+        if (cie.fde_has_augmentation) {
+            auto augmentation_length = cur.uleb128();
+            cur += augmentation_length;
+        }
+
+        zdb::Span<const std::byte> instructions = { cur.position(), start + length };
+        return { length, &cie, initial_location, address_range, instructions };
     }
 
     // 12. file_names (a sequence of file entries) The source files involved in this compilation. 
@@ -417,7 +514,8 @@ namespace {
 
 // For CallFrameInfo
 namespace zdb {
-    const CallFrameInformation::common_information_entry& CallFrameInformation::get_cie(FileOffset at) const {
+    const CallFrameInformation::common_information_entry& 
+    CallFrameInformation::get_cie(FileOffset at) const {
         uint64_t offset = at.off();
         if (cie_map_.count(offset)) {
             return cie_map_.at(offset);
