@@ -5,7 +5,8 @@
 #include <algorithm>
 #include <libzdb/elf.hpp>
 #include <libzdb/error.hpp>
- #include <iostream>
+#include <iostream>
+#include <variant>
 
 namespace {
     std::size_t eh_frame_pointer_encoding_size(std::uint8_t encoding) {
@@ -526,6 +527,59 @@ namespace {
         auto start = std::next(lhs.begin(), lhs_size - rhs_size);
         return std::equal(start, lhs.end(), rhs.begin());
     }
+}
+
+// For stack unwinding rules
+// The rule for restoring a register can be one of the following:
+//  - undefined: It’s not possible to restore the register value.
+//  - register(R): The previous value of the register is stored in another register, with the DWARF register number R.
+//  - same_value: The register hasn’t been modified from its previous value. (This is a special case of register(R) 
+//      where R is the same as the register for which the rule is defined.)
+//  - offset(N) The previous value of the register is saved at an offset of N from the current CFA.
+//  - val_offset(N) The previous value of the register is the current CFA plus N.
+//  - expression(E) The previous value of the register is located at the address produced by executing the DWARF 
+//      expression E.
+//  - val_expression(E): The previous value of the register is the value produced by executing the DWARF expression E.
+// 
+// In addition to register rules, we must handle the following rules for
+// computing the CFA:
+//  - register_and_offset(R,N): The CFA is calculated by taking the address stored in the register with the DWARF 
+//      register number R and adding the offset N to it.
+//  - expression(E): The CFA is calculated by executing the DWARF expression E
+namespace {
+    struct undefined_rule {};
+    struct register_rule {
+        std::uint32_t reg;
+    };
+    struct same_rule {};
+    struct offset_rule {
+        std::int64_t offset;
+    };
+    struct val_offset_rule {
+        std::int64_t offset;
+    };
+    struct cfa_register_rule {
+        std::uint32_t reg;
+        std::int64_t offset;
+    };
+
+    struct unwind_context {
+        Cursor cur{ {nullptr, nullptr} };
+        zdb::FileAddr location;
+        cfa_register_rule cfa_rule;
+        using rule = std::variant<
+            undefined_rule, 
+            register_rule,
+            same_rule, 
+            offset_rule,
+            val_offset_rule, 
+        >;
+        // DWARF register numbers to register restore rules
+        using ruleset = std::unordered_map<std::uint32_t, rule>;
+        ruleset cie_register_rules;
+        ruleset register_rules;
+        std::vector<std::pair<ruleset, cfa_register_rule>> rule_stack;
+    };
 }
 
 // For CallFrameInfo
