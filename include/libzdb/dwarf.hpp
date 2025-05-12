@@ -214,7 +214,7 @@ namespace zdb {
 
         // `.eh_frame_hdr` contains a fast lookup table for FDEs.
         struct eh_hdr {
-          const std::byte* start; // a pointer to the start of the .eh_frame_hdr section
+          const std::byte* start; // a pointer to the start of the `.eh_frame_hdr` section
           const std::byte* search_table; // a pointer to the start of the search table
           std::size_t count;  // the number of entries in search table
           std::uint8_t encoding; // entries’ encoding
@@ -227,6 +227,9 @@ namespace zdb {
         CallFrameInformation() = delete;
         CallFrameInformation(const CallFrameInformation&) = delete;
         CallFrameInformation& operator=(const CallFrameInformation&) = delete;
+        CallFrameInformation(const Dwarf* dwarf, eh_hdr hdr) : dwarf_(dwarf), eh_hdr_(hdr) {
+          eh_hdr_.parent = this;
+        }
 
         const Dwarf& dwarf() const { return *dwarf_; }
 
@@ -234,6 +237,7 @@ namespace zdb {
 
       private:
         const Dwarf* dwarf_;
+        eh_hdr eh_hdr_;
 
       private:
         mutable std::unordered_map<std::uint32_t, common_information_entry> cie_map_;
@@ -644,6 +648,7 @@ namespace zdb {
 
         const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);
         const std::vector<std::unique_ptr<CompileUnit>> &compile_units() const { return compile_units_; }
+        const CallFrameInformation& cfi() const { return *cfi_; }
 
         LineTable::iterator line_entry_at_address(FileAddr address) const {
           auto cu = compile_unit_containing_address(address);
@@ -664,6 +669,7 @@ namespace zdb {
 
       private:
         const ELF *elf_;
+        std::unique_ptr<CallFrameInformation> cfi_;
 
         std::unordered_map<std::size_t, std::unordered_map<std::uint64_t, Abbrev>> abbrev_tables_;
         std::vector<std::unique_ptr<CompileUnit>> compile_units_;

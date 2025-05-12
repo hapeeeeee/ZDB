@@ -8,6 +8,15 @@
  #include <iostream>
 
 namespace {
+    std::size_t eh_frame_pointer_encoding_size(std::uint8_t encoding) {
+        switch (encoding & 0x7) {
+            case DW_EH_PE_absptr: return 8;
+            case DW_EH_PE_udata2: return 2;
+            case DW_EH_PE_udata4: return 4;
+            case DW_EH_PE_udata8: return 8;
+            default: zdb::Error::send("Invalid pointer encoding");
+        }
+    }
     std::uint64_t parse_eh_frame_pointer_with_base(
         Cursor& cur, 
         std::uint8_t encoding, 
@@ -249,6 +258,13 @@ namespace {
         zdb::Span<const std::byte> instructions = { cur.position(), start + length };
         return { length, &cie, initial_location, address_range, instructions };
     }
+
+    std::unique_ptr<zdb::CallFrameInformation> parse_call_frame_information(zdb::Dwarf& dwarf) {
+        auto eh_hdr = parse_eh_hdr(dwarf);
+        return std::make_unique<zdb::CallFrameInformation>(&dwarf, eh_hdr);
+    }
+
+
 
     // 12. file_names (a sequence of file entries) The source files involved in this compilation. 
     //      Each entry contains the following: 
@@ -526,6 +542,60 @@ namespace zdb {
         auto cie = parse_cie(cur);
         cie_map_.emplace(offset, cie);
         return cie_map_.at(offset);
+    }
+
+    const std::byte* CallFrameInformation::eh_hdr::operator[](FileAddr address) const {
+        auto elf = address.elf();
+        auto text_section_start = *elf->get_section_start_file_addr_by_name(".text");
+        auto encoding_size = eh_frame_pointer_encoding_size(encoding);
+        auto row_size = encoding_size * 2;
+
+        std::size_t low = 0;
+        std::size_t high = count - 1;
+        while (low <= high) {
+            std::size_t mid = (low + high) / 2;
+            Cursor cur({ search_table + mid * row_size, search_table + count * row_size });
+            auto current_offset = elf->data_pointer_as_file_offset(cur.position());
+            auto eh_hdr_offset = elf->data_pointer_as_file_offset(start);
+            auto entry_address = parse_eh_frame_pointer(
+                *elf, 
+                cur, 
+                encoding, 
+                current_offset.off(),
+                text_section_start.addr(), 
+                eh_hdr_offset.off(), 
+                0
+            );
+            if (entry_address < address.addr()) {
+                low = mid + 1;
+            }
+            else if (entry_address > address.addr()) {
+                if (mid == 0) {
+                    Error::send("Address not found in eh_hdr");
+                }
+                high = mid - 1;
+            }
+            else {
+                high = mid;
+                break;
+            }
+        }
+
+        Cursor cur({ search_table + high * row_size + encoding_size, search_table + count * row_size });
+        auto current_offset = elf->data_pointer_as_file_offset(cur.position());
+        auto eh_hdr_offset = elf->data_pointer_as_file_offset(start);
+        auto fde_offset_int = parse_eh_frame_pointer(
+            *elf, 
+            cur, 
+            encoding, 
+            current_offset.off(),
+            text_section_start.addr(), 
+            eh_hdr_offset.off(), 
+            0
+        );
+
+        FileOffset fde_offset{ *elf, fde_offset_int };
+        return elf->file_offset_as_data_pointer(fde_offset);
     }
 }
 
@@ -1066,6 +1136,7 @@ namespace zdb {
 
     Dwarf::Dwarf(const ELF &parent) : elf_(&parent) {
         compile_units_ = parse_compile_units(*this, parent);
+        cfi_ = parse_call_frame_information(*this);
     }
 
     const std::unordered_map<std::uint64_t, Abbrev> &Dwarf::get_abbrev_table(std::size_t offset) {
