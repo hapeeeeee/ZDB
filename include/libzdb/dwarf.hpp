@@ -15,6 +15,7 @@
 #include <string>
 #include <iostream>
 #include <filesystem>
+#include <libzdb/registers.hpp>
 
 namespace {
     // `Cursor` type is to help us parse forms from various locations.
@@ -232,8 +233,9 @@ namespace zdb {
         }
 
         const Dwarf& dwarf() const { return *dwarf_; }
-
         const common_information_entry& get_cie(FileOffset at) const;
+        Registers unwind(const Process& proc, FileAddr pc, Registers& regs) const;
+
 
       private:
         const Dwarf* dwarf_;

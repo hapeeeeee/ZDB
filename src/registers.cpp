@@ -29,6 +29,9 @@ namespace {
 
 
 zdb::Registers::Value zdb::Registers::read(const RegisterInfo &info) const {
+    if (is_undefined(info.id))
+        zdb::Error::send("Register is undefined");
+
     auto bytes = as_bytes(data_);
     if (info.format == RegisterFormat::uint) {
         switch (info.size) {
@@ -56,7 +59,7 @@ zdb::Registers::Value zdb::Registers::read(const RegisterInfo &info) const {
     }
 }
 
-void zdb::Registers::write(const RegisterInfo &info, Value val) {
+void zdb::Registers::write(const RegisterInfo &info, Value val, bool commit) {
     auto bytes = as_bytes(data_);
     std::visit(
         [&](auto &v) {
@@ -71,15 +74,42 @@ void zdb::Registers::write(const RegisterInfo &info, Value val) {
         val
     );
 
-    if (info.type == RegisterType::fpr) {
-        proc_->write_fprs(data_.i387);
-    } else {
-        auto aligned_offset = info.offset & ~0b111;
-        proc_->write_user_area(
-            aligned_offset,
-            from_bytes_as<std::uint64_t>(bytes + aligned_offset)
-        );
+    if (commit) {
+        if (info.type == RegisterType::fpr) {
+            proc_->write_fprs(data_.i387);
+        } else {
+            auto aligned_offset = info.offset & ~0b111;
+            proc_->write_user_area(
+                aligned_offset,
+                from_bytes_as<std::uint64_t>(bytes + aligned_offset)
+            );
+        }
     }
 }
     
+void zdb::Registers::undefine(RegisterId id) {
+    std::size_t canonical_offset = find_register_info_by_id(id).offset >> 1;
+    undefineds_.push_back(canonical_offset);
+}
 
+bool zdb::Registers::is_undefined(RegisterId id) const {
+    std::size_t canonical_offset = find_register_info_by_id(id).offset >> 1;
+    return std::find(
+        begin(undefineds_), 
+        end(undefineds_), 
+        canonical_offset
+    ) != end(undefineds_);
+}
+
+void zdb::Registers::flush() {
+    proc_->write_fprs(data_.i387);
+    proc_->write_gprs(data_.regs);
+    auto info = find_register_info_by_id(RegisterId::dr0);
+    for (auto i = 0; i < 8; ++i) {
+        if (i == 4 or i == 5) continue;
+        auto reg_offset = info.offset + sizeof(std::uint64_t) * i;
+        auto ptr = reinterpret_cast<std::byte*>(data_.u_debugreg + i);
+        auto bytes = from_bytes_as<std::uint64_t>(ptr);
+        proc_->write_user_area(reg_offset, bytes);
+    }
+}

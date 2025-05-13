@@ -7,6 +7,7 @@
 #include <libzdb/error.hpp>
 #include <iostream>
 #include <variant>
+#include <libzdb/process.hpp>
 
 namespace {
     std::size_t eh_frame_pointer_encoding_size(std::uint8_t encoding) {
@@ -264,8 +265,6 @@ namespace {
         auto eh_hdr = parse_eh_hdr(dwarf);
         return std::make_unique<zdb::CallFrameInformation>(&dwarf, eh_hdr);
     }
-
-
 
     // 12. file_names (a sequence of file entries) The source files involved in this compilation. 
     //      Each entry contains the following: 
@@ -580,6 +579,160 @@ namespace {
         ruleset register_rules;
         std::vector<std::pair<ruleset, cfa_register_rule>> rule_stack;
     };
+
+        void execute_cfi_instruction(
+        const zdb::ELF& elf,
+        const zdb::CallFrameInformation::frame_description_entry& fde,
+        unwind_context& ctx, 
+        zdb::FileAddr pc
+    ) {
+        auto& cie = *fde.cie;
+        auto& cur = ctx.cur;
+        auto text_section_start = *elf.get_section_start_file_addr_by_name(".text");
+        auto plt_start = elf
+            .get_section_start_file_addr_by_name(".got.plt")
+            .value_or(zdb::FileAddr{});
+
+        // Call frame information instructions require one or more bytes to encode. 
+        // The most significant 2 bits of the first byte encode the primary opcode. 
+        // The other 6 bits can store either an extended opcode or operands for the instruction.
+        auto opcode = cur.u8();
+        auto primary_opcode = opcode & 0xc0;
+        auto extended_opcode = opcode & 0x3f;
+        if (primary_opcode) {
+            switch (primary_opcode) {
+            case DW_CFA_advance_loc:
+                ctx.location += extended_opcode * cie.code_alignment_factor;
+                break;
+            case DW_CFA_offset: { 
+                // takes two operands: a DWARF register number encoded in the least significant 
+                // 6 bits of the opcode and an additional ULEB128 offset. 
+                std::int64_t offset = static_cast<std::int64_t>(cur.uleb128()) * cie.data_alignment_factor;
+                ctx.register_rules.emplace(extended_opcode, offset_rule{ offset });
+                break;
+            }
+            case DW_CFA_restore:
+                // resets the rule for the given register to its original value in the CIE’s register rules
+                // Note that GCC’s unwinder treats DW_CFA_restore in the same way as DW_CFA_same_value,
+                // but we’re going to follow the spec and the behavior of libunwind
+                ctx.register_rules.emplace(
+                    extended_opcode, 
+                    ctx.cie_register_rules.at(extended_opcode)
+                );
+                break;
+            }
+        }
+        else if (extended_opcode) {
+            switch (extended_opcode) {
+            case DW_CFA_set_loc: {
+                zdb::FileOffset current_offset = elf.data_pointer_as_file_offset(cur.position());
+                auto loc = parse_eh_frame_pointer(
+                    elf, 
+                    cur, 
+                    cie.fde_pointer_encoding,
+                    current_offset.off(),
+                    text_section_start.addr(),
+                    plt_start.addr(), 
+                    fde.initial_location.addr()
+                );
+                ctx.location = zdb::FileAddr{ elf, loc };
+                break;
+            }
+            case DW_CFA_advance_loc1:
+                ctx.location += cur.u8() * cie.code_alignment_factor;
+                break;
+            case DW_CFA_advance_loc2:
+                ctx.location += cur.u16() * cie.code_alignment_factor;
+                break;
+            case DW_CFA_advance_loc4:
+                ctx.location += cur.u32() * cie.code_alignment_factor;
+                break;
+            case DW_CFA_def_cfa:
+                ctx.cfa_rule.reg = cur.uleb128();
+                ctx.cfa_rule.offset = cur.uleb128();
+                break;
+            case DW_CFA_def_cfa_sf:
+                ctx.cfa_rule.reg = cur.uleb128();
+                ctx.cfa_rule.offset = cur.sleb128() * cie.data_alignment_factor;
+                break;
+            case DW_CFA_def_cfa_register:
+                ctx.cfa_rule.reg = cur.uleb128();
+                break;
+            case DW_CFA_def_cfa_offset:
+                ctx.cfa_rule.offset = cur.uleb128();
+                break;
+            case DW_CFA_def_cfa_offset_sf:
+                ctx.cfa_rule.offset = cur.sleb128() * cie.data_alignment_factor;
+                break;
+            case DW_CFA_def_cfa_expression:
+                zdb::Error::send("DWARF expressions not yet implemented");
+
+            case DW_CFA_undefined:
+                ctx.register_rules.emplace(cur.uleb128(), undefined_rule{});
+                break;
+            case DW_CFA_same_value:
+                ctx.register_rules.emplace(cur.uleb128(), same_rule{});
+                break;
+            case DW_CFA_offset_extended: {
+                auto reg = cur.uleb128();
+                auto offset = static_cast<std::int64_t>(cur.uleb128()) * cie.data_alignment_factor;
+                ctx.register_rules.emplace(reg, offset_rule{ offset });
+                break;
+            }
+            case DW_CFA_offset_extended_sf: {
+                auto reg = cur.uleb128();
+                auto offset = cur.sleb128() * cie.data_alignment_factor;
+                ctx.register_rules.emplace(reg, offset_rule{ offset });
+                break;
+            }
+            case DW_CFA_val_offset: {
+                auto reg = cur.uleb128();
+                auto offset = static_cast<std::int64_t>(cur.uleb128()) * cie.data_alignment_factor;
+                ctx.register_rules.emplace(reg, val_offset_rule{ offset });
+                break;
+            }
+            case DW_CFA_val_offset_sf: {
+                auto reg = cur.uleb128();
+                auto offset = cur.sleb128() * cie.data_alignment_factor;
+                ctx.register_rules.emplace(reg, val_offset_rule{ offset });
+                break;
+            }
+            case DW_CFA_register: {
+                auto reg = cur.uleb128();
+                ctx.register_rules.emplace(
+                    reg,
+                    register_rule{ static_cast<std::uint32_t>(cur.uleb128()) }
+                );
+                break;
+            }
+            case DW_CFA_expression:
+                zdb::Error::send("DWARF expressions not yet implemented");
+            case DW_CFA_val_expression:
+                zdb::Error::send("DWARF expressions not yet implemented");
+            case DW_CFA_restore_extended: {
+                auto reg = cur.uleb128();
+                ctx.register_rules.emplace(reg, ctx.cie_register_rules.at(reg));
+                break;
+            }
+            case DW_CFA_remember_state:
+                ctx.rule_stack.push_back({ ctx.register_rules, ctx.cfa_rule });
+                break;
+            case DW_CFA_restore_state:
+                ctx.register_rules = ctx.rule_stack.back().first;
+                ctx.cfa_rule = ctx.rule_stack.back().second;
+                ctx.rule_stack.pop_back();
+                break;
+            }
+        }
+    }
+
+    zdb::Registers execute_unwind_rules(
+        unwind_context& ctx, 
+        zdb::Registers& old_regs,
+        const zdb::Process& proc
+    ) {
+        
+    }
 }
 
 // For CallFrameInfo
@@ -596,6 +749,29 @@ namespace zdb {
         auto cie = parse_cie(cur);
         cie_map_.emplace(offset, cie);
         return cie_map_.at(offset);
+    }
+
+    Registers CallFrameInformation::unwind(const Process& proc, FileAddr pc, Registers& regs) const {
+        auto fde_start = eh_hdr_[pc];
+        auto eh_frame_end = dwarf_->elf()->get_section_contents_by_name(".eh_frame").end();
+        Cursor cur({ fde_start, eh_frame_end });
+        auto fde = parse_fde(*this, cur);
+        if (pc < fde.initial_location || pc >= fde.initial_location + fde.address_range) {
+            zdb::Error::send("No unwind information at PC");
+        }
+        unwind_context ctx{};
+        ctx.cur = Cursor(fde.cie->instructions);
+        while (!ctx.cur.is_finished()) {
+            execute_cfi_instruction(*dwarf_->elf(), fde, ctx, pc);
+        }
+
+        ctx.cie_register_rules = ctx.register_rules;
+        ctx.cur = Cursor(fde.instructions);
+        ctx.location = fde.initial_location;
+        while (!ctx.cur.is_finished() && ctx.location <= pc) {
+            execute_cfi_instruction(*dwarf_->elf(), fde, ctx, pc);
+        }
+        return execute_unwind_rules(ctx, regs, proc);
     }
 
     const std::byte* CallFrameInformation::eh_hdr::operator[](FileAddr address) const {

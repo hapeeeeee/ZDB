@@ -27,12 +27,12 @@ namespace zdb {
         >;
 
       public:
-        Registers()                             = delete;
-        Registers(const Registers &)            = delete;
-        Registers &operator=(const Registers &) = delete;
+        Registers()                             = default;
+        Registers(const Registers &)            = default;
+        Registers &operator=(const Registers &) = default;
 
         Value read(const RegisterInfo &info) const;
-        void write(const RegisterInfo &info, Value val);
+        void write(const RegisterInfo &info, Value val, bool commit=true);
 
         template <class T> 
         T read_by_id_as(RegisterId id) const {
@@ -44,13 +44,19 @@ namespace zdb {
             return std::get<T>(read(find_register_info_by_name(name)));
         }
 
-        void write_by_id(RegisterId id, Value val) {
-            write(find_register_info_by_id(id), val);
+        void write_by_id(RegisterId id, Value val, bool commit=true) {
+            write(find_register_info_by_id(id), val, commit);
         }
 
-        void write_by_name(std::string_view name, Value val) {
-            write(find_register_info_by_name(name), val);
+        void write_by_name(std::string_view name, Value val, bool commit=true) {
+            write(find_register_info_by_name(name), val, commit);
         }
+
+        bool is_undefined(RegisterId id) const;
+        void undefine(RegisterId id);
+        VirtualAddr cfa() const { return cfa_; }
+        void set_cfa(VirtualAddr addr) { cfa_ = addr; }
+        void flush();
 
       private:
         friend Process;
@@ -58,6 +64,8 @@ namespace zdb {
 
         zdb::Process *proc_;
         user data_;
+        std::vector<std::size_t> undefineds_;
+        VirtualAddr cfa_;
     };
 } // namespace zdb
 
