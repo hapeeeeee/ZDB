@@ -84,7 +84,7 @@ zdb::StopReason zdb::Target::run_until_address(VirtualAddr address) {
 }
 
 void zdb::Target::notify_stop(const StopReason& reason) {
-    stack_.reset_inline_height();
+    stack_.unwind();
 }
 
 zdb::StopReason zdb::Target::step_in() {

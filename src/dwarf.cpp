@@ -573,14 +573,14 @@ namespace {
             offset_rule,
             val_offset_rule, 
         >;
-        // DWARF register numbers to register restore rules
+        // DWARF register id to register restore rules
         using ruleset = std::unordered_map<std::uint32_t, rule>;
         ruleset cie_register_rules;
         ruleset register_rules;
         std::vector<std::pair<ruleset, cfa_register_rule>> rule_stack;
     };
 
-        void execute_cfi_instruction(
+    void execute_cfi_instruction(
         const zdb::ELF& elf,
         const zdb::CallFrameInformation::frame_description_entry& fde,
         unwind_context& ctx, 
@@ -731,7 +731,37 @@ namespace {
         zdb::Registers& old_regs,
         const zdb::Process& proc
     ) {
-        
+        zdb::Registers unwound_regs = old_regs;
+        zdb::RegisterInfo cfa_reg_info = zdb::find_register_info_by_dwarf_id(ctx.cfa_rule.reg);
+        uint64_t cfa = 
+            std::get<std::uint64_t>(old_regs.read(cfa_reg_info)) + ctx.cfa_rule.offset;
+        old_regs.set_cfa(zdb::VirtualAddr{ cfa });
+        unwound_regs.write_by_id(zdb::RegisterId::rsp, { cfa }, false);
+        for (auto [reg, rule] : ctx.register_rules) {
+            zdb::RegisterInfo reg_info = zdb::find_register_info_by_dwarf_id(reg);
+            if (auto undef = std::get_if<undefined_rule>(&rule)) {
+                unwound_regs.undefine(reg_info.id);
+            } 
+            else if (auto same = std::get_if<same_rule>(&rule)) {
+                // Do nothing.
+            }
+            else if (auto reg = std::get_if<register_rule>(&rule)) {
+                zdb::RegisterInfo other_reg = zdb::find_register_info_by_dwarf_id(reg->reg);
+                unwound_regs.write(reg_info, old_regs.read(other_reg), false);
+            }
+            else if (auto offset = std::get_if<offset_rule>(&rule)) {
+                zdb::VirtualAddr addr = zdb::VirtualAddr{ cfa + offset->offset };
+                std::uint64_t value = zdb::from_bytes_as<std::uint64_t>(
+                    proc.read_memory(addr, 8 /* 8 in x64 */).data()
+                );
+                unwound_regs.write(reg_info, { value }, false);
+            }
+            else if (auto val_offset = std::get_if<val_offset_rule>(&rule)) {
+                auto addr = cfa + val_offset->offset;
+                unwound_regs.write(reg_info, { addr }, false);
+            }
+        }
+        return unwound_regs;
     }
 }
 
@@ -1393,7 +1423,7 @@ namespace zdb {
         index();
         for (auto& [name, entry] : function_index_) {
             Cursor cur({ entry.pos, entry.cu->data().end() });
-            auto d = parse_die(*entry.cu, cur);
+            DIE d = parse_die(*entry.cu, cur);
             if (d.contains_file_address(address) && d.abbrev_entry()->tag == DW_TAG_subprogram) {
                 // `DW_TAG_subprogram` is a regular function
                 return d;
