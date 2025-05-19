@@ -571,7 +571,7 @@ namespace {
             register_rule,
             same_rule, 
             offset_rule,
-            val_offset_rule, 
+            val_offset_rule
         >;
         // DWARF register id to register restore rules
         using ruleset = std::unordered_map<std::uint32_t, rule>;

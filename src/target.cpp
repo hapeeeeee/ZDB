@@ -197,17 +197,34 @@ zdb::StopReason zdb::Target::step_out() {
         return run_until_address(return_address);
     }
 
-    // One place where this algorithm fails to work properly is if the program is halted inside 
-    // a recursive function at least one level deep. In that case, trying to step out may actually 
-    // step into another function call, because the return address can be hit by a recursive call. 
-    // We’ll address this case in Chapter 16, where we’ll implement stack unwinding.
-    auto frame_pointer = process_
-        ->get_registers()
-        .read_by_id_as<std::uint64_t>(RegisterId::rbp);
+    // // Before: 
+    // // One place where this algorithm fails to work properly is if the program is halted inside 
+    // // a recursive function at least one level deep. In that case, trying to step out may actually 
+    // // step into another function call, because the return address can be hit by a recursive call. 
+    // // We’ll address this case in Chapter 16, where we’ll implement stack unwinding.
+    // auto frame_pointer = process_
+    //     ->get_registers()
+    //     .read_by_id_as<std::uint64_t>(RegisterId::rbp);
 
-    auto return_address = process_
-        ->read_memory_as<std::uint64_t>(VirtualAddr{ frame_pointer + 8 });
-    return run_until_address(VirtualAddr{ return_address });
+    // auto return_address = process_
+    //     ->read_memory_as<std::uint64_t>(VirtualAddr{ frame_pointer + 8 });
+    // return run_until_address(VirtualAddr{ return_address });
+
+    // Now:
+    // 最终的栈展开规则：
+    // 假设 实际函数A中调用实际函数B，实际函数B调用内联C,内联C调用内联D,pc在内联D
+    // Stack frames: [实际函数B, 内联C, 内联D, 实际函数A]
+    const zdb::Registers& regs = stack_.frames()[stack.current_frame_index() + 1].regs;
+    VirtualAddr return_address{ regs.read_by_id_as<std::uint64_t>(RegisterId::rip) };
+    zdb::StopReason reason;
+    for (std::size_t frames = stack.frames().size(); stack.frames().size() >= frames;) {
+        reason = run_until_address(return_address);
+        if (!reason.is_breakpoint() || process_->get_pc() != return_address) {
+            return reason;
+        }
+    }
+    return reason;
+
 }
 
 // find_functions_result find_functions(std::string name) const;

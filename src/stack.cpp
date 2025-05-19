@@ -35,6 +35,9 @@ namespace zdb {
         };
     }
 
+    // 最终的栈展开规则：
+    // 假设 实际函数A中调用实际函数B，实际函数B调用内联C,内联C调用内联D,pc在内联D
+    // Stack frames: [实际函数B, 内联C, 内联D, 实际函数A]
     void Stack::unwind() {
         reset_inline_height();
         current_frame_ = inline_height_;

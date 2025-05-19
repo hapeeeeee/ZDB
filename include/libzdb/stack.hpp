@@ -42,7 +42,7 @@ namespace zdb {
 
 
         std::size_t current_frame_index() const {
-          return current_frame_ - inline_height_;
+            return current_frame_ - inline_height_;
         }
         const Registers& regs() const;
         VirtualAddr get_pc() const;

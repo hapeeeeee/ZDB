@@ -188,7 +188,9 @@ namespace {
                 step        - Step-in
                 next        - Step-over
                 finish      - Step-out
-                stepi       - Single instruction step)" << std::endl;
+                stepi       - Single instruction step
+                down        - Select the stack frame below the current one
+                up          - Select the stack frame above the current one)" << std::endl;
         } else if (args[1] == "register") {
             std::cerr << R"(Available commands:
             read
@@ -237,7 +239,7 @@ namespace {
         }
     }
 
-    void handle_register_read_command(const zdb::Process &process, const std::vector<std::string> &args) {
+    void handle_register_read_command(const zdb::Target &target, const std::vector<std::string> &args) {
         auto fn_format = [](auto t) -> std::string {
             if constexpr (std::is_floating_point_v<decltype(t)>) {
                 return fmt::format("{}", t);
@@ -247,22 +249,32 @@ namespace {
                 return fmt::format("[{:#04x}]", fmt::join(t, ","));
             }
         };
+
+        const zdb::Registers& regs = target.get_stack().regs();
+        auto print_register_value = [&](auto info) {
+            if (regs.is_undefined(info.id)) {
+                fmt::print("{}:\tundefined\n", info.name);
+            }
+            else {
+                auto value = regs.read(info);
+                fmt::print("{}:\t{}\n", info.name, std::visit(fn_format, value));
+            }
+        };
         
         if (args.size() == 2                        ///< register read
             || args.size() == 3 && args[2] == "all" ///< register read all
         ) {
             for (auto reg_info : zdb::g_register_infos) {
-                bool should_print = (reg_info.type == zdb::RegisterType::gpr && reg_info.name != "orig_rax");
+                bool should_print = 
+                    (reg_info.type == zdb::RegisterType::gpr && reg_info.name != "orig_rax");
                 if (!should_print) continue;
-
-                auto value = process.get_registers().read(reg_info);
-                fmt::print("{}:\t{}\n", reg_info.name, std::visit(fn_format, value));
+                print_register_value(reg_info);
             }
-        } else if (args.size() == 3) {             ///< register read <register>
+        }
+        else if (args.size() == 3) {             ///< register read <register>
             try {
                 auto reg_info = zdb::find_register_info_by_name(args[2]);
-                auto value = process.get_registers().read(reg_info);
-                fmt::print("{}:\t{}\n", reg_info.name, std::visit(fn_format, value));
+                print_register_value(reg_info);
             } catch (const zdb::Error &e) {
                 std::cerr << "No such register\n";
                 return;
@@ -289,16 +301,16 @@ namespace {
         }
     }
 
-    void handle_register_command(zdb::Process &process, const std::vector<std::string> &args) {
+    void handle_register_command(zdb::Target &target, const std::vector<std::string> &args) {
         if (args.size() < 2) {
             print_help({"help", "register"});
             return;
         } 
         
         if (args[1] == "read") {
-            handle_register_read_command(process, args);
+            handle_register_read_command(target, args);
         } else if (args[1] == "write") {
-            handle_register_write_command(process, args);
+            handle_register_write_command(target.get_process(), args);
         } else {
             print_help({"help", "register"});
         }
@@ -674,6 +686,21 @@ namespace {
         }
     }
 
+    void print_backtrace(const zdb::Target& target) {
+        const zdb::Stack& stack = target.get_stack();
+        int i = 0;
+        for (const zdb::StackFrame& frame : stack.frames()) {
+            zdb::VirtualAddr pc = frame.backtrace_report_address;
+            std::string func_name = target.function_name_at_address(pc);
+            std::string message = i == stack.current_frame_index() ? "*" : " ";
+            message += fmt::format("[{}]: {:#x} {}", i++, pc.addr(), func_name);
+            if (frame.inlined) {
+                message += fmt::format(" [inlined] {}", *frame.func_die.name());
+            }
+            fmt::print("{}\n", message);
+        }
+    }
+
     void print_source(
         const std::filesystem::path& path, 
         std::uint64_t line,
@@ -709,28 +736,30 @@ namespace {
 
     }
 
+    void print_code_location(zdb::Target &target) {
+       if (target.get_stack().has_frames()) {
+            const zdb::StackFrame& frame = target.get_stack().current_frame();
+            print_source(frame.location.file->path, frame.location.line, 3);
+        }
+        else if (
+            auto entry = target.line_entry_at_pc();
+            entry != zdb::LineTable::iterator()
+        ) {
+            print_source(entry->file_entry->path, entry->line, 3);
+        } 
+        else {
+            print_disassembly(
+                target.get_process(), 
+                target.get_process().get_pc(), 
+                5
+            );
+        }
+    }
+
     void handle_stop(zdb::Target &target, zdb::StopReason &stop_reason) {
         print_stop_reason(target, stop_reason);
         if (stop_reason.reason == zdb::ProcessState::Stopped) {
-            if (target.get_stack().inline_height() > 0) {
-                auto stack = target.get_stack().inline_stack_at_pc();
-                zdb::DIE frame = stack[stack.size() - target.get_stack().inline_height()];
-                print_source(frame.file().path, frame.line(), 3);
-            }
-            else if (
-                auto entry = target.line_entry_at_pc();
-                entry != zdb::LineTable::iterator()
-            ) {
-                print_source(entry->file_entry->path, entry->line, 3);
-            } 
-            else {
-                print_disassembly(
-                    target.get_process(), 
-                    target.get_process().get_pc(), 
-                    5
-                );
-            }
-            
+            print_code_location(target);
         }
     }
 
@@ -746,7 +775,7 @@ namespace {
         } else if (is_prefix(command, "help")) {
             print_help(args);
         } else if (is_prefix(command, "register")) {
-            handle_register_command(*process, args);
+            handle_register_command(*target, args);
         } else if (is_prefix(command, "breakpoint")) {
             handle_breakpoint_command(*target, args);
         } else if (is_prefix(command, "step")) {
@@ -769,6 +798,14 @@ namespace {
             handle_watchpoint_command(*process, args);
         } else if (is_prefix(command, "catchpoint")) {
             handle_catchpoint_command(*process, args);
+        } else if (is_prefix(command, "backtrace")) { 
+            print_backtrace(*target);
+        }else if (is_prefix(command, "up")) {
+            target->get_stack().up();
+            print_code_location(*target);
+        } else if (is_prefix(command, "down")) {
+            target->get_stack().down();
+            print_code_location(*target);
         } else {
             std::cerr << "Unknown command\n";
         }
