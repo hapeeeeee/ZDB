@@ -78,7 +78,12 @@ namespace zdb {
         const std::vector<DIE> inline_stack,
         FileAddr pc
     ) {
-
+        for (auto it = inline_stack.rbegin() + 1; it != inline_stack.rend(); ++it) {
+            auto inlined_pc = std::prev(it)->low_pc().to_virt_addr();
+            frames_.push_back(StackFrame{ regs, inlined_pc, *it });
+            frames_.back().inlined = std::next(it) != inline_stack.rend();
+            frames_.back().location = std::prev(it)->location();
+        }
     }
 
     void Stack::create_base_frame(
@@ -96,4 +101,5 @@ namespace zdb {
         frames_.push_back({ regs, backtrace_pc, inline_stacks.back(), inlined });
         frames_.back().location = SourceLocation{ line_entry->file_entry, line_entry->line };
     }
+
 }
