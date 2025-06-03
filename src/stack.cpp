@@ -60,7 +60,6 @@ namespace zdb {
             const Dwarf &dwarf = elf->get_dwarf();
             std::vector<zdb::DIE> inline_stacks = dwarf.inline_stack_at_file_address(file_addr_pc);
             if (inline_stacks.empty()) return;
-
             if (inline_stacks.size() > 1) {
                 create_base_frame(regs, inline_stacks, file_addr_pc, true);
                 create_inline_stack_frames(regs, inline_stacks, file_addr_pc);

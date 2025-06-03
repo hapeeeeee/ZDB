@@ -3,7 +3,7 @@
 #include <optional>
 #include <libzdb/disassembler.hpp>
 #include <cxxabi.h>
-
+#include <fstream>
 
 namespace {
     std::unique_ptr<zdb::ELF> create_loaded_elf(
@@ -20,7 +20,20 @@ namespace {
         ));
 
         return elf;
-    } 
+    }
+
+    std::filesystem::path dump_vdso(const zdb::Process& proc, zdb::VirtualAddr address) {
+        char tmp_dir[] = "/tmp/sdb-XXXXXX";
+        mkdtemp(tmp_dir);
+        std::filesystem::path vdso_dump_path = std::filesystem::path(tmp_dir) / "linux-vdso.so.1";
+        std::ofstream vdso_dump(vdso_dump_path, std::ios::binary);
+        Elf64_Ehdr vdso_header = proc.read_memory_as<Elf64_Ehdr>(address);
+        auto vdso_size = 
+            vdso_header.e_shoff + vdso_header.e_shentsize * vdso_header.e_shnum;
+        std::vector<std::byte> vdso_bytes = proc.read_memory(address, vdso_size);
+        vdso_dump.write(reinterpret_cast<const char*>(vdso_bytes.data()), vdso_bytes.size());
+        return vdso_dump_path;
+    }
 }
 
 std::unique_ptr<zdb::Target> zdb::Target::launch(
@@ -316,21 +329,29 @@ namespace zdb {
         if (!obj) return "";
 
         std::optional<DIE> func = obj->get_dwarf().function_containing_address(file_address);
+        std::string elf_filename = obj->path().filename().string();
+        std::string func_name = "";
+
         if (func && func->name()) {
-            return std::string{func->name().value()};
+            // return std::string{func->name().value()};
+            func_name = func->name().value();
         }
         else if (
             std::optional<const Elf64_Sym*> elf_func = obj->get_symbol_at_file_addr(file_address);
             elf_func && ELF64_ST_TYPE(elf_func.value()->st_info) == STT_FUNC
         ) {
-            std::string elf_name = std::string{ obj->get_general_str_from_strtab(elf_func.value()->st_name) };
-            return abi::__cxa_demangle(
-                elf_name.c_str(),
-                nullptr,
-                nullptr,
-                nullptr
-            );
+
+            func_name = obj->get_general_str_from_strtab(elf_func.value()->st_name);
+            // return abi::__cxa_demangle(
+            //     elf_name.c_str(),
+            //     nullptr,
+            //     nullptr,
+            //     nullptr
+            // );
         }
+        if (!func_name.empty()) 
+            return elf_filename + "`" + func_name;
+
         return "";
     }
 
@@ -373,12 +394,53 @@ namespace zdb {
 
     }
 
-    std::optional<r_debug> zdb::Target::read_dynamic_linker_rendezvous() const {
+    std::optional<r_debug> Target::read_dynamic_linker_rendezvous() const {
         if (dynamic_linker_rendezvous_address_.addr()) {
             return process_->read_memory_as<r_debug>(dynamic_linker_rendezvous_address_);
         }
         return std::nullopt;
     }
-};
+
+    void Target::reload_dynamic_libraries() {
+        std::optional<r_debug> debug = read_dynamic_linker_rendezvous();
+        if (!debug) return;
+
+        link_map* entry_ptr = debug->r_map;
+        while (entry_ptr != nullptr) {
+            VirtualAddr entry_addr = VirtualAddr(reinterpret_cast<std::uint64_t>(entry_ptr));
+            link_map entry = process_->read_memory_as<link_map>(entry_addr);
+            entry_ptr = entry.l_next;
+
+            VirtualAddr name_addr = VirtualAddr(reinterpret_cast<std::uint64_t>(entry.l_name));
+            std::vector<std::byte> name_bytes = process_->read_memory(name_addr, 4096);
+            std::filesystem::path name = 
+                std::filesystem::path{ reinterpret_cast<char*>(name_bytes.data()) };
+            if (name.empty()) continue;
+
+            const ELF* found = nullptr;
+            const auto vdso_name = "linux-vdso.so.1";
+            if (name == vdso_name) {
+                found = elves_.get_elf_by_filename(name.c_str());
+            }
+            else {
+                found = elves_.get_elf_by_path(name);
+            }
+
+            if (!found) {
+                if (name == vdso_name) {
+                    name = dump_vdso(*process_, VirtualAddr{ entry.l_addr });
+                }
+                auto new_elf = std::make_unique<ELF>(name);
+                new_elf->notify_loaded(VirtualAddr{ entry.l_addr });
+                elves_.push(std::move(new_elf));
+            }
+
+            breakpoints_.for_each([&](std::unique_ptr<Breakpoint>& bp) {
+                bp->resolve();
+            });
+
+        }
+    }
+}; // namespace zdb;
 
         

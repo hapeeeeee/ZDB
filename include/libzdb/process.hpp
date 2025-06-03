@@ -163,7 +163,7 @@ namespace zdb {
         void clear_hardware_stoppoint(int id);
 
         template<class T>
-        T read_memory_as(VirtualAddr addr) {
+        T read_memory_as(VirtualAddr addr) const {
           std::vector<std::byte> data = read_memory(addr, sizeof(T));  
           return from_bytes_as<T>(data.data());
         }

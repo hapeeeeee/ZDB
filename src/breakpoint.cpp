@@ -31,7 +31,7 @@ void zdb::AddressBreakpoint::resolve() {
         BreakpointSite& new_site = target_
             ->get_process()
             .create_breakpoint_site(
-        this, 
+                this, 
                 next_site_id_++, 
                 address_, 
                 is_hardware_, 

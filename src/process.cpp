@@ -262,6 +262,7 @@ zdb::StopReason zdb::Process::wait_on_signal() {
         && breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)
     ) {
         set_pc(instr_begin);
+
         auto& bp = breakpoint_sites_.get_by_address(instr_begin);
         if (bp.parent_) {
             bool should_restart = bp.parent_->notify_hit();
@@ -283,7 +284,8 @@ zdb::StopReason zdb::Process::wait_on_signal() {
 
     if (target_) {
         target_->notify_stop(stop_reason);
-    }
+    } 
+    
     return stop_reason;
 }
 

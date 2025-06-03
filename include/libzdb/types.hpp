@@ -18,6 +18,7 @@ namespace zdb {
     // the actual virtual addresses in the executing program (corresponding to the `zdb::VirtAddr` type).
     class FileAddr;
     class ELF;
+    class ELFCollection;
     class VirtualAddr {
         public:
             VirtualAddr() = default;
