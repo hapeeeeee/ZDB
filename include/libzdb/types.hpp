@@ -25,6 +25,7 @@ namespace zdb {
             std::uint64_t addr() const { return addr_; }
 
             FileAddr to_file_addr(const ELF& elf) const;
+            FileAddr to_file_addr(const ELFCollection& elves) const;
             
             VirtualAddr operator+(std::int64_t offset) const {
                 return VirtualAddr(addr_ + offset);

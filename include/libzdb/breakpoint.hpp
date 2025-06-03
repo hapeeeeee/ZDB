@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <filesystem>
+#include <functional>
 
 namespace zdb {
     class Target;
@@ -41,6 +42,15 @@ namespace zdb {
             return !breakpoint_sites_.get_in_region(low, high).empty();
         }
 
+        void install_hit_handler(std::function<bool(void)> on_hit) {
+            on_hit_ = std::move(on_hit);
+        }
+
+        bool notify_hit() const {
+            if (on_hit_) return on_hit_();
+            return false;
+        }
+
       protected:
         friend Target;
         Breakpoint(Target& tgt, bool is_internal = false, bool is_hardware = false);
@@ -53,6 +63,7 @@ namespace zdb {
         bool is_internal_ = false;
         StoppointCollection<BreakpointSite, false> breakpoint_sites_;
         BreakpointSite::id_type next_site_id_ = 1;
+        std::function<bool(void)> on_hit_;
     };
 
     class FunctionBreakpoint : public Breakpoint {

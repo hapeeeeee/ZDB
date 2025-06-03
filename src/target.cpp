@@ -33,6 +33,13 @@ std::unique_ptr<zdb::Target> zdb::Target::launch(
         new Target(std::move(process), std::move(elf))
     );
     target->process_->set_target(target.get());
+    auto entry_point = VirtualAddr{ target->get_process().get_auxv()[AT_ENTRY] };
+    auto& entry_bp = target->create_address_breakpoint(entry_point, true, false);
+    entry_bp.install_hit_handler([tgt = target.get()] {
+        tgt->resolve_dynamic_linker_rendezvous();
+        return true;
+    });
+    entry_bp.enable();
     return target;
 }
 
@@ -47,11 +54,12 @@ std::unique_ptr<zdb::Target> zdb::Target::attach(pid_t pid) {
         new Target(std::move(proc), std::move(obj))
     );
     target->process_->set_target(target.get());
+    target->resolve_dynamic_linker_rendezvous();
     return target;
 }
 
 zdb::FileAddr zdb::Target::get_pc_file_address() const {
-    return process_->get_pc().to_file_addr(*elf_);
+    return process_->get_pc().to_file_addr(elves_);
 }
 
 zdb::LineTable::iterator zdb::Target::line_entry_at_pc() const {
@@ -60,6 +68,20 @@ zdb::LineTable::iterator zdb::Target::line_entry_at_pc() const {
     const CompileUnit* cu = pc.elf()->get_dwarf().compile_unit_containing_address(pc);
     if (!cu) return LineTable::iterator();
     return cu->lines().get_entry_by_address(pc);
+}
+
+std::vector<zdb::LineTable::iterator> zdb::Target::get_line_entries_by_line(
+    std::filesystem::path path, 
+    std::size_t line
+) const {
+    std::vector<zdb::LineTable::iterator> entries;
+    elves_.for_each([&](zdb::ELF& elf) {
+        for (auto& cu : elf.get_dwarf().compile_units()) {
+            auto new_entries = cu->lines().get_entries_by_line(path, line);
+            entries.insert(entries.end(), new_entries.begin(), new_entries.end());
+        }
+    });
+    return entries;
 }
 
 zdb::StopReason zdb::Target::run_until_address(VirtualAddr address) {
@@ -230,20 +252,23 @@ zdb::StopReason zdb::Target::step_out() {
 // find_functions_result find_functions(std::string name) const;
 zdb::Target::find_functions_result zdb::Target::find_functions(std::string name) const {
     find_functions_result result;
-    std::vector<DIE> dwarf_found = elf_->get_dwarf().find_functions(name);
-    if (dwarf_found.empty()) {
-        std::vector<const Elf64_Sym*> elf_found = elf_->get_symbols_by_name(name);
-        for (const Elf64_Sym* sym : elf_found) {
-            result.elf_functions.push_back(std::pair{ elf_.get(), sym });
+    elves_.for_each([&](zdb::ELF& elf) {
+        std::vector<DIE> dwarf_found = elf.get_dwarf().find_functions(name);
+        if (dwarf_found.empty()) {
+            std::vector<const Elf64_Sym*> elf_found = elf.get_symbols_by_name(name);
+            for (const Elf64_Sym* sym : elf_found) {
+                result.elf_functions.push_back(std::pair{ &elf, sym });
+            }
         }
-    }
-    else {
-        result.dwarf_functions.insert(
-            result.dwarf_functions.end(),
-            dwarf_found.begin(), 
-            dwarf_found.end()
-        );
-    }
+        else {
+            result.dwarf_functions.insert(
+                result.dwarf_functions.end(),
+                dwarf_found.begin(), 
+                dwarf_found.end()
+            );
+        }
+    });
+    
     return result;
 }
 
@@ -286,7 +311,7 @@ namespace zdb {
     }
 
     std::string Target::function_name_at_address(VirtualAddr address) const {
-        FileAddr file_address = address.to_file_addr(*elf_);
+        FileAddr file_address = address.to_file_addr(elves_);
         const ELF* obj = file_address.elf();
         if (!obj) return "";
 
@@ -309,6 +334,51 @@ namespace zdb {
         return "";
     }
 
+    void Target::resolve_dynamic_linker_rendezvous() {
+        if (dynamic_linker_rendezvous_address_.addr()) return;
+
+        std::optional<const Elf64_Shdr *>  dynamic_section = main_elf_->get_section_shdr_by_name(".dynamic");
+        FileAddr dynamic_start = FileAddr{*main_elf_, dynamic_section.value()->sh_addr};
+        std::size_t dynamic_size = dynamic_section.value()->sh_size;
+        std::vector<std::byte> dynamic_bytes = 
+            process_->read_memory(dynamic_start.to_virt_addr(), dynamic_size);
+        
+        std::vector<Elf64_Dyn> dynamic_entries(dynamic_size / sizeof(Elf64_Dyn));
+        std::copy(
+            dynamic_bytes.begin(), 
+            dynamic_bytes.end(),
+            reinterpret_cast<std::byte*>(dynamic_entries.data())
+        );
+
+        for (auto entry : dynamic_entries) {
+            if (entry.d_tag == DT_DEBUG) {
+                dynamic_linker_rendezvous_address_ = zdb::VirtualAddr{ entry.d_un.d_ptr };
+                reload_dynamic_libraries();
+                std::optional<r_debug> debug_info = read_dynamic_linker_rendezvous();
+                VirtualAddr debug_state_addr = zdb::VirtualAddr{ debug_info->r_brk };
+                Breakpoint& debug_state_bp = create_address_breakpoint(
+                    debug_state_addr, 
+                    true,
+                    false
+                );
+                debug_state_bp.install_hit_handler(
+                    [&] {
+                        reload_dynamic_libraries();
+                        return true;
+                    }
+                );
+                debug_state_bp.enable();
+            }
+        }
+
+    }
+
+    std::optional<r_debug> zdb::Target::read_dynamic_linker_rendezvous() const {
+        if (dynamic_linker_rendezvous_address_.addr()) {
+            return process_->read_memory_as<r_debug>(dynamic_linker_rendezvous_address_);
+        }
+        return std::nullopt;
+    }
 };
 
         

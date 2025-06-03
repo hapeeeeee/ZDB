@@ -55,7 +55,7 @@ namespace zdb {
         // function belongs to some shared library or that we’ve hit the topmost frame)
         const ELF * elf = file_addr_pc.elf();
         if (!elf) return;
-        while (virl_addr_pc.addr() != 0 && elf == &target_->get_elf()) {
+        while (virl_addr_pc.addr() != 0 && elf) {
             // Create stack_frame objects and unwind another frame.
             const Dwarf &dwarf = elf->get_dwarf();
             std::vector<zdb::DIE> inline_stacks = dwarf.inline_stack_at_file_address(file_addr_pc);
@@ -72,7 +72,8 @@ namespace zdb {
             virl_addr_pc = VirtualAddr{
                 regs.read_by_id_as<std::uint64_t>(RegisterId::rip) - 1
             };
-            file_addr_pc = virl_addr_pc.to_file_addr(target_->get_elf());
+            file_addr_pc = virl_addr_pc.to_file_addr(target_->get_elves());
+            elf = file_addr_pc.elf();
         }
     }
 

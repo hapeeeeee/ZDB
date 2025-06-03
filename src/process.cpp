@@ -262,6 +262,14 @@ zdb::StopReason zdb::Process::wait_on_signal() {
         && breakpoint_sites_.enabled_stoppoint_at_address(instr_begin)
     ) {
         set_pc(instr_begin);
+        auto& bp = breakpoint_sites_.get_by_address(instr_begin);
+        if (bp.parent_) {
+            bool should_restart = bp.parent_->notify_hit();
+            if (should_restart) {
+                resume();
+                return wait_on_signal();
+            }
+        }
     } 
     else if (stop_reason.trap_type == TrapType::HardwareBreakpoint) {
         auto id = get_lastest_hardward_stoppoint_id();

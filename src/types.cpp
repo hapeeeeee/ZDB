@@ -14,3 +14,9 @@ zdb::FileAddr zdb::VirtualAddr::to_file_addr(const ELF& elf) const {
     if (!section) return FileAddr{};
     return FileAddr{ elf, addr_ - elf.load_bias().addr()};
 }
+
+zdb::FileAddr zdb::VirtualAddr::to_file_addr(const ELFCollection& elves) const {
+    const zdb::ELF * elf = elves.get_elf_containing_address(*this);
+    if (!elf) return FileAddr{};
+    return to_file_addr(*elf);
+}

@@ -97,37 +97,35 @@ void zdb::FunctionBreakpoint::resolve() {
     }
 }
 
-void zdb::LineBreakpoint::resolve() {
-    Dwarf& dwarf = target_->get_elf().get_dwarf();
-    for (auto& cu : dwarf.compile_units()) {
-        auto entries = cu->lines().get_entries_by_line(file_, line_);
-        for (auto entry : entries) {
-            // We grab the DWARF file from the line table entry rather than using 
-            // the one we got from the target: this is to support shared libraries.
-            const Dwarf& dwarf = entry->address.elf()->get_dwarf();
-            std::vector<DIE> stack = dwarf.inline_stack_at_file_address(entry->address);
-            bool no_inline_stack = stack.size() == 1; 
-            auto should_skip_prologue = no_inline_stack 
-                && (stack[0].contains(DW_AT_ranges) || stack[0].contains(DW_AT_low_pc)) 
-                && stack[0].low_pc() == entry->address;
-            if (should_skip_prologue) {
-                ++entry; 
-            }
-            auto load_address = entry->address.to_virt_addr();
-            if (!breakpoint_sites_.contains_address(load_address)) {
-                auto& new_site = target_
-                    ->get_process()
-                    .create_breakpoint_site(
-                        this, 
-                        next_site_id_++, 
-                        load_address, 
-                        is_hardware_, 
-                        is_internal_
-                    );
+void zdb::LineBreakpoint::resolve() { 
+    auto entries = target_->get_line_entries_by_line(file_, line_);
+    for (auto entry : entries) {
+        // We grab the DWARF file from the line table entry rather than using 
+        // the one we got from the target: this is to support shared libraries.
+        const Dwarf& dwarf = entry->address.elf()->get_dwarf();
+        std::vector<DIE> stack = dwarf.inline_stack_at_file_address(entry->address);
+        bool no_inline_stack = stack.size() == 1; 
+        auto should_skip_prologue = no_inline_stack 
+            && (stack[0].contains(DW_AT_ranges) || stack[0].contains(DW_AT_low_pc)) 
+            && stack[0].low_pc() == entry->address;
+        if (should_skip_prologue) {
+            ++entry; 
+        }
+        auto load_address = entry->address.to_virt_addr();
+        if (!breakpoint_sites_.contains_address(load_address)) {
+            auto& new_site = target_
+                ->get_process()
+                .create_breakpoint_site(
+                    this, 
+                    next_site_id_++, 
+                    load_address, 
+                    is_hardware_, 
+                    is_internal_
+                );
 
-                breakpoint_sites_.push(&new_site);
-                if (is_enabled_) new_site.enable();
-            }
+            breakpoint_sites_.push(&new_site);
+            if (is_enabled_) new_site.enable();
         }
     }
+    
 }
