@@ -62,7 +62,7 @@ namespace zdb {
             }
 
         private:
-            uint64_t addr_;
+            uint64_t addr_ = 0;
     };
 
     class FileOffset {
