@@ -434,12 +434,10 @@ namespace zdb {
                 new_elf->notify_loaded(VirtualAddr{ entry.l_addr });
                 elves_.push(std::move(new_elf));
             }
-
-            breakpoints_.for_each([&](std::unique_ptr<Breakpoint>& bp) {
-                bp->resolve();
-            });
-
         }
+        breakpoints_.for_each([&](auto& bp) {
+            bp->resolve();
+        });
     }
 }; // namespace zdb;
 

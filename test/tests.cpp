@@ -690,7 +690,6 @@ TEST_CASE("Shared library tracing works", "[dynlib]") {
         dev_null
     );
     auto& proc2 = target2->get_process();
-    // target->create_function_breakpoint("libmeow_client_is_cute").enable();
     target2->create_function_breakpoint("libmeow_client_is_cute").enable();
     
     proc2.resume();
