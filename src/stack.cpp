@@ -5,7 +5,7 @@ namespace zdb {
     void Stack::reset_inline_height() {
         inline_height_ = 0;
         std::vector<DIE> stack = inline_stack_at_pc();
-        FileAddr pc = target_->get_pc_file_address();
+        FileAddr pc = target_->get_pc_file_address(tid_);
         for (
             auto it = stack.rbegin();
             it != stack.rend() && it->low_pc() == pc;
@@ -16,7 +16,7 @@ namespace zdb {
     }
 
     std::vector<DIE> Stack::inline_stack_at_pc() const {
-        FileAddr pc = target_->get_pc_file_address();
+        FileAddr pc = target_->get_pc_file_address(tid_);
         if (!pc.elf()) return {};
         return pc.elf()->get_dwarf().inline_stack_at_file_address(pc);
     }
@@ -42,10 +42,10 @@ namespace zdb {
         reset_inline_height();
         current_frame_ = inline_height_;
 
-        VirtualAddr virl_addr_pc = target_->get_process().get_pc();
-        FileAddr file_addr_pc =  target_->get_pc_file_address();
+        VirtualAddr virl_addr_pc = target_->get_process().get_pc(tid_);
+        FileAddr file_addr_pc =  target_->get_pc_file_address(tid_);
         Process& proc = target_->get_process();
-        Registers regs = proc.get_registers();
+        Registers regs = proc.get_registers(tid_);
 
         frames_.clear();
 

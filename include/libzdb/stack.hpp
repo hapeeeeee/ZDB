@@ -18,11 +18,12 @@ namespace zdb {
 
     class Stack {
       public:
-        Stack(Target* tgt) : target_(tgt) {}
+        Stack(Target* tgt, pid_t tid) : target_(tgt), tid_(tid) {}
         void reset_inline_height();
         std::vector<zdb::DIE> inline_stack_at_pc() const;
         std::uint32_t inline_height() const { return inline_height_; }
         const Target& get_target() const { return *target_; }
+        pid_t get_tid() const { return tid_; }
 
         void simulate_inlined_step_in() { 
           --inline_height_;
@@ -63,6 +64,7 @@ namespace zdb {
 
       private:
         Target* target_ = nullptr;
+        pid_t tid_ = 0;
         std::uint32_t inline_height_ = 0;
 
         std::vector<StackFrame> frames_;

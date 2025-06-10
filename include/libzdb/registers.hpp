@@ -60,8 +60,9 @@ namespace zdb {
 
       private:
         friend Process;
-        Registers(Process &proc) : proc_(&proc) {}
+        Registers(Process &proc, pid_t tid): proc_(&proc), tid_(tid) {}
 
+        pid_t tid_ = 0;
         zdb::Process *proc_;
         user data_;
         std::vector<std::size_t> undefineds_;

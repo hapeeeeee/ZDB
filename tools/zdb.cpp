@@ -20,6 +20,16 @@ namespace {
     void handle_sigint(int) {
         kill(g_zdb_process->pid(), SIGSTOP);
     }
+
+    void thread_lifecycle_callback(const zdb::StopReason& reason) {
+        std::string_view action;
+        switch (reason.reason) {
+            case zdb::ProcessState::Exited: { action = "exited"; break; }
+            case zdb::ProcessState::Terminated: { action = "terminated"; break; }
+            case zdb::ProcessState::Stopped: { action = "created"; break; }
+        }
+        fmt::print("Thread {} {}\n", reason.tid, action);
+    }
 }
 
 
@@ -90,10 +100,13 @@ namespace {
 
     std::string get_sigtrap_info(const zdb::Process& process, zdb::StopReason reason) {
         if (reason.trap_type == zdb::TrapType::SoftwareBreakpoint) {
-            auto& site = process.breakpoint_sites().get_by_address(process.get_pc());
+            auto& site = process
+                .breakpoint_sites()
+                .get_by_address(process.get_pc(reason.tid));
             return fmt::format(" (breakpoint {})", site.id());
         } else if (reason.trap_type == zdb::TrapType::HardwareBreakpoint) {
-            auto id = process.get_lastest_hardward_stoppoint_id();
+            auto id = process
+                .get_lastest_hardward_stoppoint_id(reason.tid);
             if (id.index() == 0) {
                 return fmt::format(" (breakpoint {})",  std::get<0>(id));
             }
@@ -133,7 +146,7 @@ namespace {
 
     std::string get_signal_stop_reason(const zdb::Target &target, zdb::StopReason &stop_reason) {
         auto& process = target.get_process();
-        auto pc = process.get_pc();
+        auto pc = process.get_pc(stop_reason.tid);
 
         std::string message = fmt::format(
             "stopped with signal {} at {:#x}",
@@ -141,7 +154,7 @@ namespace {
             pc.addr()
         );
 
-        zdb::LineTable::iterator line = target.line_entry_at_pc();
+        zdb::LineTable::iterator line = target.line_entry_at_pc(stop_reason.tid);
         if (line != zdb::LineTable::iterator()) {
             std::string file = line->file_entry->path.filename().string();
             message += fmt::format(", {}:{}", file, line->line);
@@ -163,16 +176,26 @@ namespace {
         std::string message;
         switch (stop_reason.reason) {
         case zdb::ProcessState::Terminated:
-            message = fmt::format("terminated with status {}", static_cast<int>(stop_reason.info));
-            break;
+            fmt::print(
+                "Process {} terminated with status {}", 
+                target.get_process().pid(),
+                sigabbrev_np(stop_reason.info)
+            );
+            return ;
         case zdb::ProcessState::Exited:
-            message = fmt::format("exited with status {}", static_cast<int>(stop_reason.info));
-            break;
+            fmt::print(
+                "Process {} exited with status {}", 
+                target.get_process().pid(),
+                static_cast<int>(stop_reason.info));
+            return ;
         case zdb::ProcessState::Stopped:
-            message = get_signal_stop_reason(target, stop_reason);
-            break;
+            fmt::print(
+                "Thread {} {}\n",
+                stop_reason.tid, 
+                get_signal_stop_reason(target, stop_reason)
+            );
+            return;
         }
-        fmt::print("Process {} {}\n", target.get_process().pid(), message);
     }
 
     void print_help(const std::vector<std::string> &args) {
@@ -185,6 +208,7 @@ namespace {
                 continue    - Resume the process
                 register    - Commands for operating on registers
                 memory      - Commands for operating on memory
+                thread      - Commands for operating on threads
                 step        - Step-in
                 next        - Step-over
                 finish      - Step-out
@@ -226,6 +250,10 @@ namespace {
             syscall
             syscall none
             syscall <list of syscall IDs or names>)" << std::endl;
+        } else if (is_prefix(args[1], "thread")) {
+            std::cerr << R"(Available commands:
+                list
+                select <thread ID>)" << std::endl;
         } else {
             std::cerr << "No help available on that\n";
         }
@@ -484,6 +512,36 @@ namespace {
         // } else if (is_prefix(sub_command, "delete")) {
         //     process.breakpoint_sites().remove_by_id(bp_id.value());
         // } 
+    }
+
+    void handle_thread_command(zdb::Target& target, const std::vector<std::string>& args) {
+        if (args.size() < 2) {
+            print_help({ "help", "thread" });
+            return;
+        }
+
+        if (is_prefix(args[1], "list")) {
+            for (auto& [tid, thread] : target.get_threads()) {
+                auto prefix = tid == target.get_process().current_thread() ? "*" : " ";
+                fmt::print(
+                    "{}Thread {}: {}\n",
+                    prefix,
+                    tid,
+                    get_signal_stop_reason(target, thread.state->reason)
+                );
+            }
+        } else if (is_prefix(args[1], "select")) {
+            if (args.size() != 3) {
+                print_help({ "help", "thread" });
+                return;
+            }
+            auto tid = zdb::to_integral<pid_t>(args[2]);
+            if (!tid) {
+                std::cerr << "Invalid thread id\n";
+                return;
+            }
+            target.get_process().set_current_thread(*tid);
+        }
     }
 
     /// memory read addr size
@@ -769,7 +827,7 @@ namespace {
         auto args    = split(line, ' ');
         auto command = args[0];
         if (is_prefix(command, "continue")) {
-            process->resume();
+            process->resume_all_threads();
             zdb::StopReason stop_reason = process->wait_on_signal();
             handle_stop(*target, stop_reason);
         } else if (is_prefix(command, "help")) {
@@ -778,6 +836,8 @@ namespace {
             handle_register_command(*target, args);
         } else if (is_prefix(command, "breakpoint")) {
             handle_breakpoint_command(*target, args);
+        } else if (is_prefix(command, "thread")) {
+            handle_thread_command(*target, args);
         } else if (is_prefix(command, "step")) {
             auto reason = target->step_in();
             handle_stop(*target, reason);
@@ -846,6 +906,9 @@ int main(int argc, const char **argv) {
         auto target = attach(argc, argv);
         g_zdb_process = &(target->get_process());
         signal(SIGINT, handle_sigint);
+        target->get_process()
+            .install_thread_lifecycle_callback(thread_lifecycle_callback);
+
         main_loop(target);
     } catch (const zdb::Error &err) {
         std::cout << err.what() << '\n';

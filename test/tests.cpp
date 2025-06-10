@@ -14,6 +14,7 @@
 #include <libzdb/target.hpp>
 #include <libzdb/elf.hpp>
 #include <libzdb/dwarf.hpp>
+#include <set>
 
 using namespace zdb;
 
@@ -685,18 +686,47 @@ TEST_CASE("Stack unwinding", "[unwind]") {
 
 TEST_CASE("Shared library tracing works", "[dynlib]") {
     auto dev_null = open("/dev/null", O_WRONLY);
-    auto target2 = Target::launch(
+    auto target = Target::launch(
         "bin/marshmallow",
         dev_null
     );
-    auto& proc2 = target2->get_process();
-    target2->create_function_breakpoint("libmeow_client_is_cute").enable();
+    auto& proc = target->get_process();
+    target->create_function_breakpoint("libmeow_client_is_cute").enable();
     
-    proc2.resume();
-    proc2.wait_on_signal();
-    REQUIRE(target2->get_stack().frames().size() == 2);
-    REQUIRE(target2->get_stack().frames()[0].func_die.name().value() == "libmeow_client_is_cute");
-    REQUIRE(target2->get_stack().frames()[1].func_die.name().value() == "main");
-    REQUIRE(target2->get_pc_file_address().elf()->path().filename() == "libmeow.so");
+    proc.resume();
+    proc.wait_on_signal();
+    REQUIRE(target->get_stack().frames().size() == 2);
+    REQUIRE(target->get_stack().frames()[0].func_die.name().value() == "libmeow_client_is_cute");
+    REQUIRE(target->get_stack().frames()[1].func_die.name().value() == "main");
+    REQUIRE(target->get_pc_file_address().elf()->path().filename() == "libmeow.so");
+    close(dev_null);
+}
+
+TEST_CASE("Multi-Thread works", "[thread]") {
+    auto dev_null = open("/dev/null", O_WRONLY);
+    auto target = Target::launch(
+        // "bin/marshmallow",
+        "bin/multi_threaded",
+        dev_null
+    );
+    target->create_function_breakpoint("say_hi").enable();
+    
+    std::set<pid_t> tids;
+    StopReason reason;
+    auto& proc = target->get_process();
+    do {
+        proc.resume_all_threads();
+        reason = proc.wait_on_signal();
+        for (auto& [tid, thread] : proc.thread_states()) {
+            if (thread.reason.reason == ProcessState::Stopped && tid != proc.pid()) {
+                tids.insert(tid);
+            }
+        }
+    } while (tids.size() < 10);
+
+    REQUIRE(tids.size() == 10);
+    proc.resume_all_threads();
+    reason = proc.wait_on_signal();
+    REQUIRE(reason.reason == ProcessState::Exited);
     close(dev_null);
 }

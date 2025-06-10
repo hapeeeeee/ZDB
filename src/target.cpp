@@ -71,12 +71,12 @@ std::unique_ptr<zdb::Target> zdb::Target::attach(pid_t pid) {
     return target;
 }
 
-zdb::FileAddr zdb::Target::get_pc_file_address() const {
-    return process_->get_pc().to_file_addr(elves_);
+zdb::FileAddr zdb::Target::get_pc_file_address(std::optional<pid_t> otid) const {
+    return process_->get_pc(otid).to_file_addr(elves_);
 }
 
-zdb::LineTable::iterator zdb::Target::line_entry_at_pc() const {
-    FileAddr pc = get_pc_file_address();
+zdb::LineTable::iterator zdb::Target::line_entry_at_pc(std::optional<pid_t> otid) const {
+    FileAddr pc = get_pc_file_address(otid);
     if (!pc.elf()) return LineTable::iterator();
     const CompileUnit* cu = pc.elf()->get_dwarf().compile_unit_containing_address(pc);
     if (!cu) return LineTable::iterator();
@@ -97,7 +97,8 @@ std::vector<zdb::LineTable::iterator> zdb::Target::get_line_entries_by_line(
     return entries;
 }
 
-zdb::StopReason zdb::Target::run_until_address(VirtualAddr address) {
+zdb::StopReason zdb::Target::run_until_address(VirtualAddr address, std::optional<pid_t> otid) {
+    auto tid = otid.value_or(process_->current_thread());
     BreakpointSite* breakpoint_to_remove = nullptr;
     if (!process_->breakpoint_sites().contains_address(address)) {
         breakpoint_to_remove = &process_->create_breakpoint_site(
@@ -107,105 +108,129 @@ zdb::StopReason zdb::Target::run_until_address(VirtualAddr address) {
         );
         breakpoint_to_remove->enable();
     }
-    process_->resume();
-    auto reason = process_->wait_on_signal();
-    if (reason.is_breakpoint() && process_->get_pc() == address) {
+    process_->resume(tid);
+    auto reason = process_->wait_on_signal(tid);
+    if (reason.is_breakpoint() && process_->get_pc(tid) == address) {
         reason.trap_type = TrapType::SignalStep;
     }
     if (breakpoint_to_remove) {
         process_->breakpoint_sites().remove_by_address(breakpoint_to_remove->address());
     }
+    threads_.at(tid).state->reason = reason;
     return reason;
 }
 
 void zdb::Target::notify_stop(const StopReason& reason) {
-    stack_.unwind();
+    threads_.at(reason.tid).frames.unwind();
 }
 
-zdb::StopReason zdb::Target::step_in() {
-    zdb::Stack& stack = get_stack();
+void zdb::Target::notify_thread_lifecycle_event(const zdb::StopReason& reason) {
+    auto tid = reason.tid;
+    if (reason.reason == ProcessState::Stopped) {
+        auto& state = process_->thread_states()[tid];
+        threads_.emplace(tid, Thread{ &state, Stack{this, tid} });
+    }
+    else {
+        threads_.erase(tid);
+    }
+}
+
+zdb::StopReason zdb::Target::step_in(std::optional<pid_t> otid) {
+    auto tid = otid.value_or(process_->current_thread());
+    auto& stack = get_stack(tid);
+    auto& thread = threads_.at(tid);
+
     if (stack.inline_height() > 0) {
         stack.simulate_inlined_step_in();
-        return StopReason(ProcessState::Stopped, SIGTRAP, TrapType::SignalStep, std::nullopt);
+        StopReason reason(tid, ProcessState::Stopped, SIGTRAP, TrapType::SignalStep);
+        thread.state->reason = reason;
+        return reason;
     }
 
-    auto orig_line = line_entry_at_pc();
+    auto orig_line = line_entry_at_pc(tid);
     do {
-        auto reason = process_->step();
+        auto reason = process_->step(tid);
         if (!reason.is_step()) {
             // Stopped at a breakpoint or terminated completely
+            thread.state->reason = reason;
             return reason;
         }
-    } while ((line_entry_at_pc() == orig_line || line_entry_at_pc()->end_sequence)
-            && line_entry_at_pc() != LineTable::iterator{});
+    } while ((line_entry_at_pc(tid) == orig_line || line_entry_at_pc(tid)->end_sequence)
+            && line_entry_at_pc(tid) != LineTable::iterator{});
 
     // we may still need to step over the function prologue
     // if we’ve entered a new function
-    auto pc = get_pc_file_address();
+    auto pc = get_pc_file_address(tid);
     if (pc.elf() != nullptr) {
         auto& dwarf = pc.elf()->get_dwarf();
         auto func = dwarf.function_containing_address(pc);
         if (func && func->low_pc() == pc) {
-            auto line = line_entry_at_pc();
+            auto line = line_entry_at_pc(tid);
             if (line != LineTable::iterator{}) {
                 ++line;
-                return run_until_address(line->address.to_virt_addr());
+                return run_until_address(line->address.to_virt_addr(), tid);
             }
         }
     }
 
-    return StopReason(ProcessState::Stopped, SIGTRAP, TrapType::SignalStep, std::nullopt);
-}
-
-zdb::StopReason zdb::Target::step_over() {
-    LineTable::iterator orig_line = line_entry_at_pc();
-    Disassembler disas(*process_);
-
-    zdb::StopReason reason;
-    auto& stack = get_stack();
-    do {
-        do {
-            auto inline_stack = stack.inline_stack_at_pc();
-            auto at_start_of_inline_frame = stack.inline_height() > 0;
-            if (at_start_of_inline_frame) {
-                // This implementation of skipping inline frames will work in most cases
-                // with unoptimized code, but it’s not necessarily the case that control flow
-                // will hit the instruction directly after the inlined block after completing its
-                // execution. Production debuggers will look for any branch instructions in
-                // the inlined block, and if they find any, will step through the inlined block by
-                // putting breakpoints at each branch instruction until the program makes it
-                // out of the program counter ranges for the inlined function. This approach
-                // is significantly more complex, so I’ve opted for the simpler solution here.
-                DIE frame_to_skip = inline_stack[inline_stack.size() - stack.inline_height()];
-                VirtualAddr return_address = frame_to_skip.high_pc().to_virt_addr();
-                reason = run_until_address(return_address);
-                if (!reason.is_step() || process_->get_pc() != return_address) {
-                    return reason;
-                }
-            }
-            else if (
-                auto instructions = disas.disassemble(2, process_->get_pc());
-                instructions[0].text.rfind("call") == 0
-            ) {
-                reason = run_until_address(instructions[1].address);
-                if (!reason.is_step() || process_->get_pc() != instructions[1].address) {
-                    return reason;
-                }
-            }
-            else {
-                reason = process_->step();
-                if (!reason.is_step()) return reason;
-            }
-        
-        } while (line_entry_at_pc() == orig_line || line_entry_at_pc()->end_sequence);
-
-    } while ((line_entry_at_pc() == orig_line || line_entry_at_pc()->end_sequence)
-        && line_entry_at_pc() != LineTable::iterator{});
-
+    StopReason reason(tid, ProcessState::Stopped, SIGTRAP, TrapType::SignalStep, std::nullopt);
+    thread.state->reason = reason;
     return reason;
 }
 
-zdb::StopReason zdb::Target::step_out() {
+zdb::StopReason zdb::Target::step_over(std::optional<pid_t> otid) {
+    auto tid = otid.value_or(process_->current_thread());
+    auto& stack = get_stack(tid);
+    auto& thread = threads_.at(tid);
+
+    LineTable::iterator orig_line = line_entry_at_pc(tid);
+    Disassembler disas(*process_);
+
+    zdb::StopReason reason;
+    do {
+        auto inline_stack = stack.inline_stack_at_pc();
+        auto at_start_of_inline_frame = stack.inline_height() > 0;
+        if (at_start_of_inline_frame) {
+            // This implementation of skipping inline frames will work in most cases
+            // with unoptimized code, but it’s not necessarily the case that control flow
+            // will hit the instruction directly after the inlined block after completing its
+            // execution. Production debuggers will look for any branch instructions in
+            // the inlined block, and if they find any, will step through the inlined block by
+            // putting breakpoints at each branch instruction until the program makes it
+            // out of the program counter ranges for the inlined function. This approach
+            // is significantly more complex, so I’ve opted for the simpler solution here.
+            DIE frame_to_skip = inline_stack[inline_stack.size() - stack.inline_height()];
+            VirtualAddr return_address = frame_to_skip.high_pc().to_virt_addr();
+            reason = run_until_address(return_address, tid);
+            if (!reason.is_step() || process_->get_pc(tid) != return_address) {
+                thread.state->reason = reason;
+                return reason;
+            }
+        }
+        else if (
+            auto instructions = disas.disassemble(2, process_->get_pc(tid));
+            instructions[0].text.rfind("call") == 0
+        ) {
+            reason = run_until_address(instructions[1].address, tid);
+            if (!reason.is_step() || process_->get_pc(tid) != instructions[1].address) {
+                thread.state->reason = reason;
+                return reason;
+            }
+        }
+        else {
+            reason = process_->step(tid);
+            if (!reason.is_step()) {
+                thread.state->reason = reason;
+                return reason;
+            }
+        }
+    } while ((line_entry_at_pc(tid) == orig_line || line_entry_at_pc(tid)->end_sequence)
+        && line_entry_at_pc(tid) != LineTable::iterator{});
+    thread.state->reason = reason;
+    return reason;
+}
+
+zdb::StopReason zdb::Target::step_out(std::optional<pid_t> otid) {
     // Recall the simplified x64 stack we discussed in Chapter 2, in which each
     // stack frame contains the return address of the current function. However,
     // while the program is running, it’s not clear how to locate exactly where on
@@ -222,14 +247,16 @@ zdb::StopReason zdb::Target::step_out() {
     // to step out, we just need to read the memory 8 bytes above the current value of rbp. 
     // If we’re inside of an inlined function, we instead find the end address of the inlined 
     // block. With this knowledge, we can now implement step_out:
-    zdb::Stack& stack = get_stack();
+    auto tid = otid.value_or(process_->current_thread());
+    auto& stack = get_stack(tid);
+
     std::vector<DIE> inline_stack = stack.inline_stack_at_pc();
     bool has_inline_frames = inline_stack.size() > 1;
     bool at_inline_frame = stack.inline_height() < inline_stack.size() - 1;
     if (has_inline_frames && at_inline_frame) {
         DIE current_frame = inline_stack[inline_stack.size() - stack.inline_height() - 1];
         VirtualAddr return_address = current_frame.high_pc().to_virt_addr();
-        return run_until_address(return_address);
+        return run_until_address(return_address, tid);
     }
 
     // // Before: 
@@ -249,17 +276,16 @@ zdb::StopReason zdb::Target::step_out() {
     // 最终的栈展开规则：
     // 假设 实际函数A中调用实际函数B，实际函数B调用内联C,内联C调用内联D,pc在内联D
     // Stack frames: [实际函数B, 内联C, 内联D, 实际函数A]
-    const zdb::Registers& regs = stack_.frames()[stack.current_frame_index() + 1].regs;
+    const zdb::Registers& regs = stack.frames()[stack.current_frame_index() + 1].regs;
     VirtualAddr return_address{ regs.read_by_id_as<std::uint64_t>(RegisterId::rip) };
     zdb::StopReason reason;
     for (std::size_t frames = stack.frames().size(); stack.frames().size() >= frames;) {
-        reason = run_until_address(return_address);
-        if (!reason.is_breakpoint() || process_->get_pc() != return_address) {
+        reason = run_until_address(return_address, tid);
+        if (!reason.is_breakpoint() || process_->get_pc(tid) != return_address) {
             return reason;
         }
     }
     return reason;
-
 }
 
 // find_functions_result find_functions(std::string name) const;

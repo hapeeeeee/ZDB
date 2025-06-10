@@ -17,6 +17,8 @@ add_test_cpp_executable(memory)
 add_test_cpp_executable(anti_debugger)
 add_test_cpp_executable(overloaded)
 add_test_cpp_executable(step)
+add_test_cpp_executable(multi_threaded)
+target_link_libraries(multi_threaded pthread)
 
 add_test_asm_executable(reg_write)
 add_test_asm_executable(reg_read)
