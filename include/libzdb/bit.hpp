@@ -45,5 +45,23 @@ namespace zdb {
     inline std::string_view to_string_view(const std::vector<std::byte>& bytes) {
         return std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
+
+    inline void memcpy_bits(
+        std::uint8_t* dest, 
+        std::uint32_t dest_bit,
+        const std::uint8_t* src, 
+        std::uint32_t src_bit,
+        std::uint32_t n_bits
+    ) {
+        for (; n_bits; --n_bits, ++src_bit, ++dest_bit) {
+            std::uint8_t dest_mask = 1 << (dest_bit % 8);
+            dest[dest_bit / 8] &= ~dest_mask;
+            auto src_mask = 1 << (src_bit % 8);
+            auto corresponding_src_bit_set = src[src_bit / 8] & src_mask;
+            if (corresponding_src_bit_set) {
+                dest[dest_bit / 8] |= dest_mask;
+            }
+        }
+    }
 }
 #endif // LIBZDB_BIT_HPP

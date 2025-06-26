@@ -465,6 +465,58 @@ namespace zdb {
             bp->resolve();
         });
     }
+
+    std::vector<std::byte> Target::read_location_data(
+        const DwarfExpression::result& loc, 
+        std::size_t size,
+        std::optional<pid_t> otid
+    ) const {
+        auto tid = otid.value_or(process_->current_thread());
+        if (auto simple_loc = std::get_if<DwarfExpression::simple_location>(&loc)) {
+            if (auto reg_loc = std::get_if<DwarfExpression::register_result>(simple_loc)) {
+                const zdb::RegisterInfo& reg_info = find_register_info_by_dwarf_id(reg_loc->reg_num);
+                Registers::Value reg_value = threads_.at(tid).frames.current_frame().regs.read(reg_info);
+                auto get_bytes = [](auto value) {
+                    std::vector<std::byte> bytes(sizeof(value));
+                    auto begin = reinterpret_cast<const std::byte*>(&value);
+                    std::copy(begin, begin + sizeof(value), bytes.data());
+                    return bytes;
+                };
+                return std::visit(get_bytes, reg_value);
+            }
+            else if (auto addr_res = std::get_if<DwarfExpression::address_result>(simple_loc)) {
+                return process_->read_memory(addr_res->address, size);
+            }
+            else if (auto data_res = std::get_if<DwarfExpression::data_result>(simple_loc)) {
+                return { data_res->data.begin(), data_res->data.end() };
+            }
+            else if (auto literal_res = std::get_if<DwarfExpression::literal_result>(simple_loc)) {
+                auto begin = reinterpret_cast<const std::byte*>(&literal_res->value);
+                return { begin, begin + size };
+            }
+            else if (auto pieces_res = std::get_if<DwarfExpression::pieces_result>(&loc)) {
+                std::vector<std::byte> data(size);
+                std::size_t offset = 0; // 返回值data的当前位偏移
+                for (auto& piece : pieces_res->pieces) {
+                    auto byte_size = (piece.bit_size + 7) / 8;
+                    auto piece_data = read_location_data(piece.location, byte_size, otid);
+                    if (offset % 8 == 0 && piece.offset == 0 && piece.bit_size % 8 == 0) {
+                        std::copy(piece_data.begin(), piece_data.end(), data.begin() + offset / 8);
+                        offset += piece.bit_size;
+                    } 
+                    else {
+                        auto dest = reinterpret_cast<std::uint8_t*>(data.data());
+                        auto src = reinterpret_cast<const std::uint8_t*>(piece_data.data());
+                        // 从src的piece.offset开始, 读取piece.bit_size位的数据,复制到dest里
+                        memcpy_bits(dest, 0, src, piece.offset, piece.bit_size);
+                    }
+                }
+                return data;
+            }
+
+            Error::send("Invalid simple location type");
+        }
+    }
 }; // namespace zdb;
 
         

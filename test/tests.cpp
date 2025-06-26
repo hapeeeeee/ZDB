@@ -46,7 +46,6 @@ namespace {
     /// 所以可以计算出可执行程序的入口指令的内存地址相对于程序加载内存地址的偏移 
     /// 计算方式是：入口指令的内存地址 = 程序的起始内存地址 + 入口指令的磁盘实际偏移 (get_load_address)
     /// img desc: docs/breakpoint_site_set/testcase_for_calu_breakpointsite_set.png
-
     std::int64_t get_section_load_bias(std::filesystem::path path, Elf64_Addr vaddr) {
         auto command = std::string("readelf -WS ") + path.string();
         auto fd = popen(command.c_str(), "r");
@@ -729,4 +728,67 @@ TEST_CASE("Multi-Thread works", "[thread]") {
     reason = proc.wait_on_signal();
     REQUIRE(reason.reason == ProcessState::Exited);
     close(dev_null);
+}
+
+TEST_CASE("Can read global integer variable", "[variable]") {
+    auto target = Target::launch("bin/global_variable");
+    auto& proc = target->get_process();
+    target->create_function_breakpoint("main").enable();
+    proc.resume();
+    proc.wait_on_signal();
+    auto var_die = target
+        ->get_main_elf()
+        .get_dwarf()
+        .find_global_variable("g_int");
+    auto var_loc = var_die
+        .value()[DW_AT_location]
+        .as_evaluated_location(proc, proc.get_registers(), false);
+    auto res = target->read_location_data(var_loc, 8);
+    auto val = from_bytes_as<std::uint64_t>(res.data());
+    REQUIRE(val == 0);
+
+    target->step_over();
+    res = target->read_location_data(var_loc, 8);
+    val = from_bytes_as<std::uint64_t>(res.data());
+    REQUIRE(val == 1);
+
+    target->step_over();
+    res = target->read_location_data(var_loc, 8);
+    val = from_bytes_as<std::uint64_t>(res.data());
+    REQUIRE(val == 42);
+}
+
+TEST_CASE("DWARF expressions work", "[dwarf]") {
+    std::vector<std::uint8_t> piece_data = {
+    DW_OP_reg16,        // 表达式第一个片段：来自寄存器 16
+    DW_OP_piece, 4,     // 占 4 字节（即 32 bit）
+
+    DW_OP_piece, 8,     // 第二个片段：8 字节的数据，但没有指定来源 → 表示空白片段
+
+    DW_OP_const4u, 0xff, 0xff, 0xff, 0xff,  // 第三个片段：常量 0xffffffff
+    DW_OP_bit_piece, 5, 12  // 表示取这段常量值的 **5 bit**，放在整体数据的 **offset = 12 bit** 处
+};
+    auto target = Target::launch("bin/step");
+    auto& proc = target->get_process();
+    zdb::Span<const std::byte> data {
+        reinterpret_cast<std::byte*>(piece_data.data()), piece_data.size() 
+    };
+    auto expr = zdb::DwarfExpression(
+        target->get_main_elf().get_dwarf(), data, false
+    );
+    auto res = expr.eval(proc, proc.get_registers());
+    auto& pieces = 
+        std::get<zdb::DwarfExpression::pieces_result>(res).pieces;
+    REQUIRE(pieces.size() == 3);
+    REQUIRE(pieces[0].bit_size == 4 * 8);
+    REQUIRE(pieces[1].bit_size == 8 * 8);
+    REQUIRE(pieces[2].bit_size == 5);
+    REQUIRE(std::get<DwarfExpression::register_result>(pieces[0].location).reg_num == 16);
+    REQUIRE(std::get_if<DwarfExpression::empty_result>(&pieces[1].location) != nullptr);
+    REQUIRE(
+        std::get<DwarfExpression::address_result>(pieces[2].location).address.addr() == 0xffffffff
+    );
+    REQUIRE(pieces[0].offset == 0);
+    REQUIRE(pieces[1].offset == 0);
+    REQUIRE(pieces[2].offset == 12);
 }

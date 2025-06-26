@@ -41,11 +41,11 @@ namespace zdb {
         const Process& get_process() const { return *process_; }
         Stack& get_stack(std::optional<pid_t> otid = std::nullopt) { 
           	auto tid = otid.value_or(process_->current_thread());
-			return threads_.at(tid).frames;
-		}
+            return threads_.at(tid).frames;
+        }
         const Stack& get_stack(std::optional<pid_t> otid = std::nullopt) const { 
-			return const_cast<Target*>(this)->get_stack(otid);
-		}
+            return const_cast<Target*>(this)->get_stack(otid);
+        }
 
         ELFCollection& get_elves() { return elves_; }
         const ELFCollection& get_elves() const { return elves_; }
@@ -104,6 +104,12 @@ namespace zdb {
         std::optional<r_debug> read_dynamic_linker_rendezvous() const;
         void resolve_dynamic_linker_rendezvous();
         void reload_dynamic_libraries();
+
+        std::vector<std::byte> read_location_data(
+            const DwarfExpression::result& loc, 
+            std::size_t size,
+            std::optional<pid_t> otid = std::nullopt
+        ) const;
 
 
       private:

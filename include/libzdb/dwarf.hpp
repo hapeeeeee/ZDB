@@ -349,6 +349,105 @@ namespace zdb {
         const std::byte* pos_;
     };
 
+// ----------------------------------- For dwarf expr ---------------------------------------------------- //
+	// A DWARF expression encodes either a single location description or a location list. 
+	// A single location description locates a variable that uses a single address for its 
+	// entire lifetime, whereas a location list locates a variable that has different locations 
+	// depending on the current value of the program counter. Location lists consist of several 
+	// single location descriptions, alongside the ranges of program counter values for which 
+	// they are valid.
+	class DwarfExpression {
+	  public:
+	  	// Single Location Descriptions::Address
+		// 执行完表达式所有指令后,栈顶结果是地址
+	  	struct address_result { VirtualAddr address; }; 
+		// Single Location Descriptions::Register
+		// 指定了用于存储变量值的寄存器
+		// 注意: 如果表达式在.eh_frame部分或DW_AT_frame_base属性中，
+		// 	相关寄存器的值推入堆栈来计算地址位置描述。
+		struct register_result { std::uint64_t reg_num; };
+		// Single Location Descriptions::Empty
+		// 所描述的变量的地址和内容是未知的。这通常发生在编译器优化变量时
+		struct empty_result {};
+		// Single Location Descriptions::Implicit
+		// 第一种情况:直接给出值,一个ULEB 128参数表示数据长度，后跟编码后的数据
+		struct data_result { Span<const std::byte> data; };
+		// Single Location Descriptions::Implicit
+		// 第二种情况:用于DW_OP_stack_value操作码,表示栈顶值是变量的实际值,而不是地址
+		struct literal_result { std::uint64_t value; };
+
+		using simple_location = std::variant<
+			address_result, 
+			register_result,
+			data_result, 
+			literal_result, 
+			empty_result
+		>;
+
+		// Composite Location Descriptions
+		// 复合位置描述由一系列简单的位置描述组成,，
+		// 每个位置描述都以单个DW_OP_piece或DW_OP_bit_piece操作码结束。
+		// DW_OP_piece操作码有一个ULEB 128操作数，该操作数给出了存储在其前面的简单位置描述对应数据的字节大小
+		// DW_OP_bit_piece操作码有两个操作数：一个ULEB128给出数据的位大小（不是字节大小），
+		// 	另一个ULEB128给出从前面简单位置描述给出的位置的位偏移量，数据存储在该位置。
+		// 模板:
+		//   simple_location DW_OP_piece byte_size simple_location DW_OP_bit_piece bits_size
+		// 例子
+		//   DW_OP_reg3 DW_OP_piece 4 DW_OP_reg10 DW_OP_piece 2
+		// 解释
+		// 	 寄存器3存储对象的前4个字节，寄存器10存储最后2个字节。
+		struct pieces_result {
+			// DW_OP_piece<byte size>等效于DW_OP_bit_piece（<byte size>*8）0。
+			struct piece {
+				simple_location location;
+				std::uint64_t bit_size;
+				std::uint64_t offset = 0;
+			};
+			std::vector<piece> pieces;
+		};
+		using result = std::variant<simple_location, pieces_result>;
+
+
+
+	  public:
+	  	DwarfExpression(const Dwarf& parent,
+						Span<const std::byte> expr_data,
+						bool in_frame_info)
+			: parent_(&parent)
+			, expr_data_(expr_data)
+			, in_frame_info_(in_frame_info) {}
+		
+		result eval(
+			const Process& proc,
+			const Registers& regs,
+			bool push_cfa = false) const;
+
+	  private:
+	  	const Dwarf* parent_;
+		Span<const std::byte> expr_data_;
+		bool in_frame_info_;
+	};
+
+  	class LocationList {
+      public:
+		LocationList(const Dwarf& parent, 
+					const CompileUnit& cu,
+					Span<const std::byte> expr_data, 
+					bool in_frame_info)
+		: parent_(&parent)
+		, cu_(&cu)
+		, expr_data_(expr_data)
+		, in_frame_info_(in_frame_info) {}
+
+		DwarfExpression::result eval(const zdb::Process& proc, const Registers& regs) const;
+		
+      private:
+		const Dwarf* parent_;
+		const CompileUnit* cu_;
+		Span<const std::byte> expr_data_;
+		bool in_frame_info_;
+  };
+
 // ----------------------------------- For Abbrev & DIE -------------------------------------------------- //
     struct SourceLocation {
         const LineTable::file* file;
@@ -370,6 +469,12 @@ namespace zdb {
         std::string_view as_string() const;
         DIE as_reference() const;
         RangeList as_range_list() const;
+        DwarfExpression as_expression(bool in_frame_info) const;
+        LocationList as_location_list(bool in_frame_info) const;
+        DwarfExpression::result as_evaluated_location(
+			const Process& proc,
+			const Registers& regs,
+			bool in_frame_info) const;
         
       private:
         const CompileUnit* cu_;
@@ -646,6 +751,7 @@ namespace zdb {
         const CompileUnit* compile_unit_containing_address(FileAddr address) const;
         std::optional<DIE> function_containing_address(FileAddr address) const;
         std::vector<DIE> find_functions(std::string name) const;
+        std::optional<DIE> find_global_variable(std::string name) const;
         std::vector<DIE> inline_stack_at_file_address(FileAddr address) const;
 
         const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);
@@ -657,17 +763,17 @@ namespace zdb {
           if (!cu) return {};
           return cu->lines().get_entry_by_address(address);
         }
-        
 
       private:
         void index() const;
-        void index_die(const DIE& current) const;
+        void index_die(const DIE& current, bool in_function = false) const;
 
         struct index_entry {
           const CompileUnit* cu;
           const std::byte* pos;
         };
         mutable std::unordered_multimap<std::string, index_entry> function_index_;
+        mutable std::unordered_multimap<std::string, index_entry> global_variable_index_;
 
       private:
         const ELF *elf_;

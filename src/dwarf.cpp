@@ -10,6 +10,19 @@
 #include <libzdb/process.hpp>
 
 namespace {
+    zdb::VirtualAddr read_frame_base_result(
+        const zdb::DwarfExpression::result& loc,
+        const zdb::Registers& regs
+    ) {
+        const zdb::DwarfExpression::simple_location *simple_loc = 
+            std::get_if<zdb::DwarfExpression::simple_location>(&loc);
+        if (!simple_loc) zdb::Error::send("Unsupported frame base location");
+        if (auto addr_res = std::get_if<zdb::DwarfExpression::address_result>(simple_loc)) {
+            return addr_res->address;
+        }
+        zdb::Error::send("Unsupported frame base location");
+    }
+
     std::size_t eh_frame_pointer_encoding_size(std::uint8_t encoding) {
         switch (encoding & 0x7) {
             case DW_EH_PE_absptr: return 8;
@@ -557,27 +570,50 @@ namespace {
     struct val_offset_rule {
         std::int64_t offset;
     };
+    struct expr_rule {
+        // 接受一个ULEB128操作数和一个附加DW_FORM_block操作数，
+        // 前者表示要为其定义规则的DWARF寄存器编号，后者表示DWARF表达式E，
+        // 并将寄存器的规则设置为表达式（E）。在执行E之前，此表达式将CFA推入DWARF表达式堆栈。
+        // 结果是寄存器的值的地址
+        zdb::DwarfExpression expr;
+    };
+    struct val_expr_rule {
+        // 同expr_rule, 结果为寄存器的值
+        zdb::DwarfExpression expr;
+    };
     struct cfa_register_rule {
+        // cfa的回溯是通过寄存器的值+偏移
         std::uint32_t reg;
         std::int64_t offset;
     };
+    struct cfa_expr_rule {
+        // cfa的回溯是通过Dwarf表达式
+        zdb::DwarfExpression expr;
+    };
+
+
 
     struct unwind_context {
         Cursor cur{ {nullptr, nullptr} };
         zdb::FileAddr location;
-        cfa_register_rule cfa_rule;
         using rule = std::variant<
             undefined_rule, 
             register_rule,
             same_rule, 
             offset_rule,
-            val_offset_rule
+            val_offset_rule,
+            expr_rule,
+            val_expr_rule
         >;
         // DWARF register id to register restore rules
         using ruleset = std::unordered_map<std::uint32_t, rule>;
         ruleset cie_register_rules;
         ruleset register_rules;
-        std::vector<std::pair<ruleset, cfa_register_rule>> rule_stack;
+
+        using cfa_rule_type = std::variant<cfa_register_rule, cfa_expr_rule>;
+        cfa_rule_type cfa_rule;
+
+        std::vector<std::pair<ruleset, cfa_rule_type>> rule_stack;
     };
 
     void execute_cfi_instruction(
@@ -624,104 +660,136 @@ namespace {
         }
         else if (extended_opcode) {
             switch (extended_opcode) {
-            case DW_CFA_set_loc: {
-                zdb::FileOffset current_offset = elf.data_pointer_as_file_offset(cur.position());
-                auto loc = parse_eh_frame_pointer(
-                    elf, 
-                    cur, 
-                    cie.fde_pointer_encoding,
-                    current_offset.off(),
-                    text_section_start.addr(),
-                    plt_start.addr(), 
-                    fde.initial_location.addr()
-                );
-                ctx.location = zdb::FileAddr{ elf, loc };
-                break;
-            }
-            case DW_CFA_advance_loc1:
-                ctx.location += cur.u8() * cie.code_alignment_factor;
-                break;
-            case DW_CFA_advance_loc2:
-                ctx.location += cur.u16() * cie.code_alignment_factor;
-                break;
-            case DW_CFA_advance_loc4:
-                ctx.location += cur.u32() * cie.code_alignment_factor;
-                break;
-            case DW_CFA_def_cfa:
-                ctx.cfa_rule.reg = cur.uleb128();
-                ctx.cfa_rule.offset = cur.uleb128();
-                break;
-            case DW_CFA_def_cfa_sf:
-                ctx.cfa_rule.reg = cur.uleb128();
-                ctx.cfa_rule.offset = cur.sleb128() * cie.data_alignment_factor;
-                break;
-            case DW_CFA_def_cfa_register:
-                ctx.cfa_rule.reg = cur.uleb128();
-                break;
-            case DW_CFA_def_cfa_offset:
-                ctx.cfa_rule.offset = cur.uleb128();
-                break;
-            case DW_CFA_def_cfa_offset_sf:
-                ctx.cfa_rule.offset = cur.sleb128() * cie.data_alignment_factor;
-                break;
-            case DW_CFA_def_cfa_expression:
-                zdb::Error::send("DWARF expressions not yet implemented");
-
-            case DW_CFA_undefined:
-                ctx.register_rules.emplace(cur.uleb128(), undefined_rule{});
-                break;
-            case DW_CFA_same_value:
-                ctx.register_rules.emplace(cur.uleb128(), same_rule{});
-                break;
-            case DW_CFA_offset_extended: {
-                auto reg = cur.uleb128();
-                auto offset = static_cast<std::int64_t>(cur.uleb128()) * cie.data_alignment_factor;
-                ctx.register_rules.emplace(reg, offset_rule{ offset });
-                break;
-            }
-            case DW_CFA_offset_extended_sf: {
-                auto reg = cur.uleb128();
-                auto offset = cur.sleb128() * cie.data_alignment_factor;
-                ctx.register_rules.emplace(reg, offset_rule{ offset });
-                break;
-            }
-            case DW_CFA_val_offset: {
-                auto reg = cur.uleb128();
-                auto offset = static_cast<std::int64_t>(cur.uleb128()) * cie.data_alignment_factor;
-                ctx.register_rules.emplace(reg, val_offset_rule{ offset });
-                break;
-            }
-            case DW_CFA_val_offset_sf: {
-                auto reg = cur.uleb128();
-                auto offset = cur.sleb128() * cie.data_alignment_factor;
-                ctx.register_rules.emplace(reg, val_offset_rule{ offset });
-                break;
-            }
-            case DW_CFA_register: {
-                auto reg = cur.uleb128();
-                ctx.register_rules.emplace(
-                    reg,
-                    register_rule{ static_cast<std::uint32_t>(cur.uleb128()) }
-                );
-                break;
-            }
-            case DW_CFA_expression:
-                zdb::Error::send("DWARF expressions not yet implemented");
-            case DW_CFA_val_expression:
-                zdb::Error::send("DWARF expressions not yet implemented");
-            case DW_CFA_restore_extended: {
-                auto reg = cur.uleb128();
-                ctx.register_rules.emplace(reg, ctx.cie_register_rules.at(reg));
-                break;
-            }
-            case DW_CFA_remember_state:
-                ctx.rule_stack.push_back({ ctx.register_rules, ctx.cfa_rule });
-                break;
-            case DW_CFA_restore_state:
-                ctx.register_rules = ctx.rule_stack.back().first;
-                ctx.cfa_rule = ctx.rule_stack.back().second;
-                ctx.rule_stack.pop_back();
-                break;
+                case DW_CFA_set_loc: {
+                    zdb::FileOffset current_offset = elf.data_pointer_as_file_offset(cur.position());
+                    auto loc = parse_eh_frame_pointer(
+                        elf, 
+                        cur, 
+                        cie.fde_pointer_encoding,
+                        current_offset.off(),
+                        text_section_start.addr(),
+                        plt_start.addr(), 
+                        fde.initial_location.addr()
+                    );
+                    ctx.location = zdb::FileAddr{ elf, loc };
+                    break;
+                }
+                case DW_CFA_advance_loc1:
+                    ctx.location += cur.u8() * cie.code_alignment_factor;
+                    break;
+                case DW_CFA_advance_loc2:
+                    ctx.location += cur.u16() * cie.code_alignment_factor;
+                    break;
+                case DW_CFA_advance_loc4:
+                    ctx.location += cur.u32() * cie.code_alignment_factor;
+                    break;
+                case DW_CFA_def_cfa:
+                    ctx.cfa_rule = cfa_register_rule {
+                        static_cast<std::uint32_t>(cur.uleb128()),
+                        static_cast<std::uint32_t>(cur.uleb128())
+                    };
+                    break;
+                case DW_CFA_def_cfa_sf:
+                    ctx.cfa_rule = cfa_register_rule {
+                        static_cast<std::uint32_t>(cur.uleb128()),
+                        cur.sleb128() * cie.data_alignment_factor
+                    };
+                    break;
+                case DW_CFA_def_cfa_register:
+                    std::get<cfa_register_rule>(ctx.cfa_rule).reg = cur.uleb128();
+                    break;
+                case DW_CFA_def_cfa_offset:
+                    std::get<cfa_register_rule>(ctx.cfa_rule).offset = cur.uleb128();
+                    break;
+                case DW_CFA_def_cfa_offset_sf:
+                    std::get<cfa_register_rule>(ctx.cfa_rule).offset = cur.sleb128() * cie.data_alignment_factor;
+                    break;
+                case DW_CFA_def_cfa_expression: {
+                    uint64_t length = cur.uleb128();
+                    auto expr = zdb::DwarfExpression{
+                        elf, 
+                        { cur.position(), cur.position() + length }, 
+                        true 
+                    };
+                    ctx.cfa_rule = cfa_expr_rule{ expr };
+                    break;
+                }
+                case DW_CFA_undefined:
+                    ctx.register_rules.emplace(cur.uleb128(), undefined_rule{});
+                    break;
+                case DW_CFA_same_value: {
+                    ctx.register_rules.emplace(cur.uleb128(), same_rule{});
+                    break;
+                }
+                case DW_CFA_offset_extended: {
+                    auto reg = cur.uleb128();
+                    auto offset = static_cast<std::int64_t>(cur.uleb128()) * cie.data_alignment_factor;
+                    ctx.register_rules.emplace(reg, offset_rule{ offset });
+                    break;
+                }
+                case DW_CFA_offset_extended_sf: {
+                    auto reg = cur.uleb128();
+                    auto offset = cur.sleb128() * cie.data_alignment_factor;
+                    ctx.register_rules.emplace(reg, offset_rule{ offset });
+                    break;
+                }
+                case DW_CFA_val_offset: {
+                    auto reg = cur.uleb128();
+                    auto offset = static_cast<std::int64_t>(cur.uleb128()) * cie.data_alignment_factor;
+                    ctx.register_rules.emplace(reg, val_offset_rule{ offset });
+                    break;
+                }
+                case DW_CFA_val_offset_sf: {
+                    auto reg = cur.uleb128();
+                    auto offset = cur.sleb128() * cie.data_alignment_factor;
+                    ctx.register_rules.emplace(reg, val_offset_rule{ offset });
+                    break;
+                }
+                case DW_CFA_register: {
+                    auto reg = cur.uleb128();
+                    ctx.register_rules.emplace(
+                        reg,
+                        register_rule{ static_cast<std::uint32_t>(cur.uleb128()) }
+                    );
+                    break;
+                }
+                case DW_CFA_expression: {
+                    uint64_t reg = cur.uleb128();
+                    uint64_t length = cur.uleb128();
+                    auto expr = zdb::DwarfExpression{
+                        elf, 
+                        { cur.position(), cur.position() + length }, 
+                        true 
+                    };
+                    ctx.register_rules.emplace(reg, expr_rule{ expr });
+                    break;
+                }
+                case DW_CFA_val_expression: {
+                    uint64_t reg = cur.uleb128();
+                    uint64_t length = cur.uleb128();
+                    auto expr = zdb::DwarfExpression{
+                        elf, 
+                        { cur.position(), cur.position() + length }, 
+                        true 
+                    };
+                    ctx.register_rules.emplace(reg, val_expr_rule{ expr });
+                    break;
+                }
+                case DW_CFA_restore_extended: {
+                    auto reg = cur.uleb128();
+                    ctx.register_rules.emplace(reg, ctx.cie_register_rules.at(reg));
+                    break;
+                }
+                case DW_CFA_remember_state: {
+                    ctx.rule_stack.push_back({ ctx.register_rules, ctx.cfa_rule });
+                    break;
+                }
+                case DW_CFA_restore_state: {
+                    ctx.register_rules = ctx.rule_stack.back().first;
+                    ctx.cfa_rule = ctx.rule_stack.back().second;
+                    ctx.rule_stack.pop_back();
+                    break;
+                }
             }
         }
     }
@@ -731,10 +799,24 @@ namespace {
         zdb::Registers& old_regs,
         const zdb::Process& proc
     ) {
+        auto dwexp_addr_result = [&](const auto& res) {
+            auto& loc = std::get<zdb::DwarfExpression::simple_location>(res);
+            auto& addr_res = std::get<zdb::DwarfExpression::address_result>(loc);
+            return zdb::VirtualAddr{ addr_res.address.addr() };
+        };
+
         zdb::Registers unwound_regs = old_regs;
-        zdb::RegisterInfo cfa_reg_info = zdb::find_register_info_by_dwarf_id(ctx.cfa_rule.reg);
-        uint64_t cfa = 
-            std::get<std::uint64_t>(old_regs.read(cfa_reg_info)) + ctx.cfa_rule.offset;
+
+        std::uint64_t cfa;
+        if (auto reg_rule = std::get_if<cfa_register_rule>(&ctx.cfa_rule)) {
+            zdb::RegisterInfo reg_info = zdb::find_register_info_by_dwarf_id(reg_rule->reg);
+            cfa = std::get<std::uint64_t>(old_regs.read(reg_info)) + reg_rule->offset;
+        }
+        else if (auto expr = std::get_if<cfa_expr_rule>(&ctx.cfa_rule)) {
+            zdb::DwarfExpression::result res = expr->expr.eval(proc, old_regs);
+            cfa = dwexp_addr_result(res).addr();
+        }
+
         old_regs.set_cfa(zdb::VirtualAddr{ cfa });
         unwound_regs.write_by_id(zdb::RegisterId::rsp, { cfa }, false);
         for (auto [reg, rule] : ctx.register_rules) {
@@ -759,7 +841,18 @@ namespace {
             else if (auto val_offset = std::get_if<val_offset_rule>(&rule)) {
                 auto addr = cfa + val_offset->offset;
                 unwound_regs.write(reg_info, { addr }, false);
-            }
+            } 
+            else if (auto expr = std::get_if<expr_rule>(&rule)) {
+                auto res = expr->expr.eval(proc, old_regs, true);
+                auto addr = dwexp_addr_result(res);
+                uint64_t value = proc.read_memory_as<std::uint64_t>(addr);
+                unwound_regs.write(reg_info, { value }, false);
+            } 
+            else if (auto val_expr = std::get_if<val_expr_rule>(&rule)) {
+                auto res = val_expr->expr.eval(proc, old_regs, true);
+                auto addr = dwexp_addr_result(res);
+                unwound_regs.write(reg_info, { addr.addr() }, false);
+            } 
         }
         return unwound_regs;
     }
@@ -866,7 +959,6 @@ namespace zdb {
         if (form_ != DW_FORM_addr) Error::send("Invalid address type");
         auto elf = cu_->dwarf_info()->elf();
         return FileAddr{ *elf, cur.u64() };
-
     }
 
     std::uint32_t Attr::as_section_offset() const {
@@ -991,6 +1083,42 @@ namespace zdb {
             root[DW_AT_low_pc].as_address() :
             FileAddr {};
         return { cu_, data, base_address };
+    }
+
+    DwarfExpression Attr::as_expression(bool in_frame_info) const {
+        Cursor cursor({ location_, cu_->data().end() });
+        auto length = cursor.uleb128();
+        Span<const std::byte> data{ cursor.position(), length };
+        return DwarfExpression{ *cu_->dwarf_info(), data, in_frame_info };
+    }
+
+    LocationList Attr::as_location_list(bool in_frame_info) const {
+        zdb::Span<const std::byte> section = cu_
+            ->dwarf_info()
+            ->elf()
+            ->get_section_contents_by_name(".debug_loc");
+        Cursor cursor({ location_, cu_->data().end() });
+        auto offset = cursor.u32();
+        Span<const std::byte> data(section.begin() + offset, section.end());
+        return LocationList{ *cu_->dwarf_info(), *cu_, data, in_frame_info };
+    }
+
+    DwarfExpression::result Attr::as_evaluated_location(
+        const Process& proc,
+        const Registers& regs,
+        bool in_frame_info
+    ) const {
+        if (form_ == DW_FORM_exprloc) {
+            auto expr = as_expression(in_frame_info);
+            return expr.eval(proc, regs);
+        }
+        else if (form_ == DW_FORM_sec_offset) {
+            auto loc_list = as_location_list(in_frame_info);
+            return loc_list.eval(proc, regs);
+        }
+        else {
+            Error::send("Invalid location type");
+        }
     }
 }
 
@@ -1384,6 +1512,372 @@ namespace zdb {
     }
 }
 
+// For DwarfExpr 
+namespace zdb {
+    DwarfExpression::result DwarfExpression::eval(
+        const Process& proc,
+        const Registers& regs,
+        bool push_cfa
+    ) const {
+        Cursor cursor({ expr_data_.begin(), expr_data_.end() });
+
+        std::vector<std::uint64_t> stack;
+        if (push_cfa) stack.push_back(regs.cfa().addr());
+        std::optional<simple_location> most_recent_location;
+        std::vector<pieces_result::piece> pieces;
+
+        // 默认情况下，我们假设DWARF表达式的结果是一个地址，
+        // 但是DW_OP_stack_value操作码可能会覆盖这个值
+        bool result_is_address = true;
+
+        // 堆栈操作: 算数运算
+        auto binop = [&](auto op) {
+            auto rhs = stack.back();
+            stack.pop_back();
+            auto lhs = stack.back();
+            stack.pop_back();
+            stack.push_back(op(lhs, rhs));
+        };
+
+         // 堆栈操作: 关系运算
+        auto relop = [&](auto op) {
+            auto rhs = static_cast<std::int64_t>(stack.back());
+            stack.pop_back();
+            auto lhs = static_cast<std::int64_t>(stack.back());
+            stack.pop_back();
+            stack.push_back(op(lhs, rhs) ? 1 : 0);
+        };
+
+        auto virt_pc = VirtualAddr{
+            regs.read_by_id_as<std::uint64_t>(RegisterId::rip)
+        };
+        FileAddr file_pc = virt_pc.to_file_addr(*parent_->elf());
+        std::optional<zdb::DIE> func = parent_->function_containing_address(file_pc);
+
+        auto get_current_location = [&]() {
+            simple_location loc;
+            if (stack.empty()) {
+                loc = most_recent_location.value_or(empty_result{});
+                most_recent_location.reset();
+            }
+            else if (result_is_address) {
+                loc = address_result{ VirtualAddr{stack.back()} };
+                stack.pop_back();
+            }
+            else {
+                loc = literal_result{ stack.back() };
+                stack.pop_back();
+                result_is_address = true;
+            }
+            return loc;
+        };
+    
+        // 执行dwarf表达式
+        while (!cursor.is_finished()) {
+            uint8_t opcode = cursor.u8();
+
+            // 直接push 0~31进入栈
+            if (opcode >= DW_OP_lit0 && opcode <= DW_OP_lit31) {
+                stack.push_back(opcode - DW_OP_lit0);
+            }
+            // 直接从寄存器0~32拿取值
+            else if (opcode >= DW_OP_reg0 && opcode <= DW_OP_reg31) {
+                std::int32_t reg = opcode - DW_OP_reg0;
+                // 在栈上下文中,需要将寄存器值入栈
+                if (in_frame_info_) {
+                    Registers::Value reg_val = regs.read(find_register_info_by_dwarf_id(reg));
+                    stack.push_back(std::get<std::uint64_t>(reg_val));
+                }
+                // 寄存器id为dwarf表达式结果
+                else {
+                    most_recent_location = register_result{ static_cast<std::uint64_t>(reg) };
+                }
+            }
+            // 新的地址 = 寄存器0~32的值 + 偏移
+            // DW_OP_breg0 32: 寄存器0的值 加上 32 得到新的地址
+            else if (opcode >= DW_OP_breg0 && opcode <= DW_OP_breg31) {
+                std::int32_t reg = opcode - DW_OP_breg0;
+                Registers::Value reg_val = regs.read(find_register_info_by_dwarf_id(reg));
+                int64_t offset = cursor.sleb128();
+                stack.push_back(std::get<std::uint64_t>(reg_val) + offset);
+            }
+
+            switch (opcode) {
+            case DW_OP_addr: {
+                // DW_OP_addr 给出的是一个“文件地址”（file address）
+                // 但调试器在运行时要操作的是虚拟地址空间中的内存
+                auto addr = FileAddr{ *(parent_->elf()), cursor.u64() };
+                stack.push_back(addr.to_virt_addr().addr());
+                break;
+            }
+            case DW_OP_const1u:
+                stack.push_back(cursor.u8());
+                break;
+            case DW_OP_const1s:
+                stack.push_back(cursor.s8());
+                break;
+            case DW_OP_const2u:
+                stack.push_back(cursor.u16());
+                break;
+            case DW_OP_const2s:
+                stack.push_back(cursor.s16());
+                break;
+            case DW_OP_const4u:
+                stack.push_back(cursor.u32());
+                break;
+            case DW_OP_const4s:
+                stack.push_back(cursor.s32());
+                break;
+            case DW_OP_const8u:
+                stack.push_back(cursor.u64());
+                break;
+            case DW_OP_const8s:
+                stack.push_back(cursor.s64());
+                break;
+            case DW_OP_constu:
+                stack.push_back(cursor.uleb128());
+                break;
+            case DW_OP_consts:
+                stack.push_back(cursor.sleb128());
+                break;
+            case DW_OP_bregx: {
+                // 新的地址 = 寄存器0~32的值 + 偏移
+                // DW_OP_bregx 54 32: 寄存器54的值 加上 32 得到新的地址
+                Registers::Value reg_val = regs.read(
+                    zdb::find_register_info_by_dwarf_id(cursor.uleb128())
+                );
+                stack.push_back(std::get<std::uint64_t>(reg_val) + cursor.sleb128());
+                break;
+            }
+            case DW_OP_fbreg: {
+                // DW_OP_fbreg -50: 值存在于帧基数的-50字节偏移处，
+                int64_t  offset = cursor.sleb128();
+                auto fb_loc = func
+                    .value()[DW_AT_frame_base]
+                    .as_evaluated_location(proc, regs, /*in_frame_info=*/true);
+                auto fb_addr = read_frame_base_result(fb_loc, regs);
+                stack.push_back(fb_addr.addr() + offset);
+                break;
+            }
+            case DW_OP_dup:
+                stack.push_back(stack.back());
+                break;
+            case DW_OP_drop:
+                stack.pop_back();
+                break;
+            case DW_OP_pick:
+                stack.push_back(stack.rbegin()[cursor.u8()]);
+                break;
+            case DW_OP_over:
+                stack.push_back(stack.rbegin()[1]);
+                break;
+            case DW_OP_swap:
+                std::swap(stack.rbegin()[0], stack.rbegin()[1]);
+                break;
+            case DW_OP_rot:
+                std::rotate(stack.rbegin(), stack.rbegin() + 1, stack.rbegin() + 3);
+                break;
+            case DW_OP_deref: {
+                auto addr = VirtualAddr{ stack.back() };
+                stack.back() = proc.read_memory_as<std::uint64_t>(addr);
+                break;
+            }
+            case DW_OP_deref_size: {
+                auto addr = VirtualAddr{ stack.back() };
+                auto size_to_read = cursor.u8();
+                auto mem = proc.read_memory(addr, size_to_read);
+                std::uint64_t res = 0;
+                std::copy(
+                    mem.data(), 
+                    mem.data() + mem.size(),
+                    reinterpret_cast<std::byte*>(&res)
+                );
+                stack.back() = res;
+                break;
+            }
+            case DW_OP_xderef:
+                zdb::Error::send("DW_OP_xderef not supported");
+            case DW_OP_xderef_size:
+                zdb::Error::send("DW_OP_xderef_size not supported");
+            case DW_OP_push_object_address:
+                zdb::Error::send("Unsupported opcode DW_OP_push_object_address");
+            case DW_OP_form_tls_address:
+                zdb::Error::send("Unsupported opcode DW_OP_form_tls_address");
+            case DW_OP_call_frame_cfa:
+                stack.push_back(regs.cfa().addr());
+                break;
+            case DW_OP_minus:
+                binop(std::minus{});
+                break;
+            case DW_OP_mod:
+                binop(std::modulus{});
+                break;
+            case DW_OP_mul:
+                binop(std::multiplies{});
+                break;
+            case DW_OP_and:
+                binop(std::bit_and{});
+                break;
+            case DW_OP_or:
+                binop(std::bit_or{});
+                break;
+            case DW_OP_plus:
+                binop(std::plus{});
+                break;
+            case DW_OP_shl:
+                binop([](auto lhs, auto rhs) { return lhs << rhs; });
+                break;
+            case DW_OP_shr:
+                // 逻辑位移: 只补0
+                binop([](auto lhs, auto rhs) { return lhs >> rhs; });
+                break;
+            case DW_OP_shra:
+                // 算数位移: 根据正负,补0 or
+                binop([](auto lhs, auto rhs) { return static_cast<std::int64_t>(lhs) >> rhs; });
+                break;
+            case DW_OP_xor:
+                binop(std::bit_xor{});
+                break;
+            case DW_OP_div: {
+                auto rhs = static_cast<std::int64_t>(stack.back());
+                stack.pop_back();
+                auto lhs = static_cast<std::int64_t>(stack.back());
+                stack.pop_back();
+                stack.push_back(static_cast<std::uint64_t>(lhs / rhs));
+                break;
+            }
+            case DW_OP_abs: {
+                auto sval = static_cast<std::int64_t>(stack.back());
+                sval = std::abs(sval);
+                stack.back() = static_cast<std::uint64_t>(sval);
+                break;
+            }
+            case DW_OP_neg: {
+                auto neg = -static_cast<std::int64_t>(stack.back());
+                stack.back() = static_cast<std::uint64_t>(neg);
+                break;
+            }
+            case DW_OP_plus_uconst:
+                stack.back() += cursor.uleb128();
+                break;
+            case DW_OP_not:
+                stack.back() = ~stack.back();
+                break;          
+            case DW_OP_le:
+                relop(std::less_equal{});
+                break;
+            case DW_OP_ge:
+                relop(std::greater_equal{});
+                break;
+            case DW_OP_eq:
+                relop(std::equal_to{});
+                break;
+            case DW_OP_lt:
+                relop(std::less{});
+                break;
+            case DW_OP_gt:
+                relop(std::greater{});
+                break;
+            case DW_OP_ne:
+                relop(std::not_equal_to{});
+                break;    
+            case DW_OP_skip:
+                cursor += cursor.s16();
+                break;
+            case DW_OP_bra:
+                if (stack.back() != 0) {
+                    cursor += cursor.s16();
+                }
+                stack.pop_back();
+                break;
+            case DW_OP_call2:
+                zdb::Error::send("Unsupported opcode DW_OP_call2");
+            case DW_OP_call4:
+                zdb::Error::send("Unsupported opcode DW_OP_call4");
+            case DW_OP_call_ref:
+                zdb::Error::send("Unsupported opcode DW_OP_call_ref");     
+            case DW_OP_regx: {
+                uint64_t reg_id = cursor.uleb128();
+                // 在栈上下文中,需要将寄存器值入栈
+                if (in_frame_info_) {
+                    Registers::Value reg_val = regs.read(find_register_info_by_dwarf_id(reg_id));
+                    stack.push_back(std::get<std::uint64_t>(reg_val));
+                }
+                // 寄存器id为dwarf表达式结果
+                else {
+                    most_recent_location = register_result{ reg_id };
+                }
+            }
+            case DW_OP_implicit_value: {
+                uint64_t  length = cursor.uleb128();
+                most_recent_location = data_result{ Span<const std::byte>{cursor.position(), length} };
+                break;
+            }
+            case DW_OP_stack_value:
+                result_is_address = false;
+                break;
+            case DW_OP_nop:
+                break;
+            case DW_OP_piece: {
+                uint64_t byte_size = cursor.uleb128();
+                simple_location loc = get_current_location();
+                pieces.push_back(pieces_result::piece{ loc, byte_size * 8 });
+                break;
+            }
+            case DW_OP_bit_piece: {
+                uint64_t bit_size = cursor.uleb128();
+                uint64_t offset = cursor.uleb128();
+                simple_location loc = get_current_location();
+                pieces.push_back(pieces_result::piece{ loc, bit_size, offset });
+                break;
+            }
+            default:
+                break;
+            }
+        }
+
+        if (!pieces.empty()) {
+            return pieces_result{ pieces };
+        }
+
+        return get_current_location();
+
+    }
+
+    zdb::DwarfExpression::result zdb::LocationList::eval(
+        const zdb::Process& proc, 
+        const Registers& regs
+    ) const {
+        VirtualAddr virt_pc = VirtualAddr{ regs.read_by_id_as<std::uint64_t>(RegisterId::rip) };
+        FileAddr pc = virt_pc.to_file_addr(*parent_->elf());
+        auto func = parent_->function_containing_address(pc);
+
+        Cursor cursor({ expr_data_.begin(), expr_data_.end() });
+        constexpr auto base_address_flag = ~static_cast<std::uint64_t>(0);
+        uint64_t base_address = cu_->root()[DW_AT_low_pc].as_address().addr();
+
+        uint64_t first = cursor.u64();
+        uint64_t second = cursor.u64();
+        while (!(first == 0 && second == 0)) {
+            if (first == base_address_flag) {
+                base_address = second;
+            }
+            else {
+                uint16_t length = cursor.u16();
+                if (pc.addr() >= base_address + first && pc.addr() < base_address + second) {
+                    DwarfExpression expr(*parent_, { cursor.position(), cursor.position() + length }, in_frame_info_);
+                    return expr.eval(proc, regs);
+                }
+                else {
+                    cursor += length;
+                }
+            }
+            first = cursor.u64();
+            second = cursor.u64();
+        }
+    }
+};
+
 // For Dwarf&CompileUnit
 namespace zdb {
     CompileUnit::CompileUnit(
@@ -1449,6 +1943,16 @@ namespace zdb {
         return found;
     }
 
+    std::optional<zdb::DIE> zdb::Dwarf::find_global_variable(std::string name) const {
+        index();
+        auto it = global_variable_index_.find(name);
+        if (it != global_variable_index_.end()) {
+            Cursor cur({ it->second.pos, it->second.cu->data().end() });
+            return parse_die(*it->second.cu, cur);
+        }
+        return std::nullopt;
+    }
+
     std::vector<DIE> Dwarf::inline_stack_at_file_address(FileAddr address) const {
         auto func = function_containing_address(address);
         std::vector<DIE> inline_stack;
@@ -1484,7 +1988,7 @@ namespace zdb {
         }
     }
 
-    void Dwarf::index_die(const DIE& current) const {
+    void Dwarf::index_die(const DIE& current, bool in_function) const {
         bool has_range = 
             current.contains(DW_AT_low_pc) || current.contains(DW_AT_ranges);
 
@@ -1497,8 +2001,19 @@ namespace zdb {
             }
         }
 
+        auto has_location = current.contains(DW_AT_location);
+        auto is_variable = current.abbrev_entry()->tag == DW_TAG_variable;
+        if (has_location && is_variable && !in_function) {
+            // 有分配内存,是变量并且不在函数中,说明是全局变量
+            if (auto name = current.name()) {
+                index_entry entry{ current.cu(), current.position() };
+                global_variable_index_.emplace(*name, entry);
+            }
+        }
+        if (is_function) in_function = true;
+
         for (auto child : current.children()) {
-            index_die(child);
+            index_die(child, is_function);
         }
     }
 

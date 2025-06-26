@@ -205,6 +205,7 @@ namespace {
                 breakpoint  - Commands for operating on breakpoints
                 watchpoint  - Commands for operating on watchpoints
                 catchpoint  - Commands for operating on catchpoints
+                variable    - Commands for operating on variables
                 continue    - Resume the process
                 register    - Commands for operating on registers
                 memory      - Commands for operating on memory
@@ -250,6 +251,9 @@ namespace {
             syscall
             syscall none
             syscall <list of syscall IDs or names>)" << std::endl;
+        } else if (is_prefix(args[1], "variable")) {
+            std::cerr << R"(Available commands:
+            read <variable>)" << std::endl;
         } else if (is_prefix(args[1], "thread")) {
             std::cerr << R"(Available commands:
                 list
@@ -469,8 +473,6 @@ namespace {
             );
             target.breakpoints().remove_by_id(*id);
         }
-
-
     }
 
     void handle_breakpoint_command(zdb::Target& target, const std::vector<std::string>& args) {
@@ -541,6 +543,28 @@ namespace {
                 return;
             }
             target.get_process().set_current_thread(*tid);
+        }
+    }
+
+    void handle_variable_command(zdb::Target& target, const std::vector<std::string>& args) {
+        if (args.size() < 3) {
+            print_help({ "help", "variable" });
+            return;
+        }
+
+        if (is_prefix(args[1], "read")) {
+            auto die = target.get_main_elf().get_dwarf().find_global_variable(args[2]);
+            auto loc = die
+                .value()[DW_AT_location]
+                .as_evaluated_location(
+                    target.get_process(), 
+                    target.get_stack().current_frame().regs, 
+                    false);
+
+            auto value = target.read_location_data(loc, 8);
+            std::uint64_t res = 0;
+            std::copy(value.begin(), value.end(), reinterpret_cast<std::byte*>(&res));
+            std::cout << "Value: " << res << '\n';
         }
     }
 
@@ -838,6 +862,8 @@ namespace {
             handle_breakpoint_command(*target, args);
         } else if (is_prefix(command, "thread")) {
             handle_thread_command(*target, args);
+        } else if (is_prefix(command, "variable")) {
+            handle_variable_command(*target, args);
         } else if (is_prefix(command, "step")) {
             auto reason = target->step_in();
             handle_stop(*target, reason);
