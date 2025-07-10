@@ -669,6 +669,17 @@ zdb::BreakpointSite& zdb::Process::create_breakpoint_site(
     );
 }
 
+std::string zdb::Process::read_string(VirtualAddr address) const {
+    std::string ret;
+    while (true) {
+        auto data = read_memory(address, 1024);
+        for (auto c : data) {
+            if (c == std::byte{ 0 }) return ret;
+            ret.push_back(static_cast<char>(c));
+        }
+    }
+}
+
 std::vector<std::byte> zdb::Process::read_memory(VirtualAddr addr, std::size_t amount) const {
     std::vector<std::byte> result(amount);
     iovec local_iov = {result.data(), result.size()};

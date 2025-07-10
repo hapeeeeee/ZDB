@@ -184,6 +184,8 @@ namespace zdb {
         get_lastest_hardward_stoppoint_id(std::optional<pid_t> otid = std::nullopt) const;
         void clear_hardware_stoppoint(int id);
 
+
+        std::string read_string(VirtualAddr address) const;
         template<class T>
         T read_memory_as(VirtualAddr addr) const {
           std::vector<std::byte> data = read_memory(addr, sizeof(T));  
@@ -232,7 +234,7 @@ namespace zdb {
         std::function<void(const StopReason)> thread_lifecycle_callback_;
         void read_all_registers(pid_t tid);
         void populate_existing_threads();
-		// 吞掉all-stop模式下，stop_running_threads中人为发送的，被挂起的SIGSTOP
+		    // 吞掉all-stop模式下，stop_running_threads中人为发送的，被挂起的SIGSTOP
         void swallow_pending_sigstop(pid_t tid);
         void send_continue(pid_t tid);
         void step_over_breakpoint(pid_t tid);

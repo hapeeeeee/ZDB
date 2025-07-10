@@ -154,6 +154,7 @@ namespace zdb {
     class ELF;
     class Dwarf;
     class RangeList;
+    class Type;
 
 // ----------------------------------- For `.eh_frame` and `.eh_frame_hdr` ------------------------//
     class CallFrameInformation {
@@ -471,6 +472,7 @@ namespace zdb {
         RangeList as_range_list() const;
         DwarfExpression as_expression(bool in_frame_info) const;
         LocationList as_location_list(bool in_frame_info) const;
+        Type as_type() const;
         DwarfExpression::result as_evaluated_location(
 			const Process& proc,
 			const Registers& regs,
@@ -574,6 +576,17 @@ namespace zdb {
         SourceLocation location() const;
         const LineTable::file& file() const;
         std::uint64_t line() const;
+
+        struct bitfield_information {
+          std::uint64_t bit_size; // 需要读取的数据的size,单位为bit
+          std::uint64_t storage_byte_size; // 整个的数据
+          std::uint8_t bit_offset; // 需要读取数据的偏移位
+        };
+
+        // 获取该字段所属类的字节大小（在某些情况下，我们将其用作存储字节大小）
+        // 返回该DIE的位字段信息
+        std::optional<bitfield_information> 
+        get_bitfield_information(std::uint64_t class_byte_size) const;
 
 
       private:
@@ -752,6 +765,8 @@ namespace zdb {
         std::optional<DIE> function_containing_address(FileAddr address) const;
         std::vector<DIE> find_functions(std::string name) const;
         std::optional<DIE> find_global_variable(std::string name) const;
+        std::optional<DIE> find_local_variable(std::string name, FileAddr pc) const;
+        std::vector<DIE> scopes_at_address(FileAddr address) const;
         std::vector<DIE> inline_stack_at_file_address(FileAddr address) const;
 
         const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);

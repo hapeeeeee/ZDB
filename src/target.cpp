@@ -1,12 +1,48 @@
 #include <libzdb/target.hpp>
+#include <libzdb/type.hpp>
 #include <libzdb/elf.hpp>
+#include <libzdb/parse.hpp>
 #include <optional>
 #include <libzdb/disassembler.hpp>
 #include <cxxabi.h>
 #include <fstream>
 
 namespace {
-    std::unique_ptr<zdb::ELF> create_loaded_elf(
+    zdb::TypedData get_initial_variable_data(
+    const zdb::Target& target, std::string name, zdb::FileAddr pc) {
+        std::optional<zdb::DIE> var_die = target.find_variable(name, pc);
+        if (!var_die) {
+            zdb::Error::send("Variable not found");
+        }
+
+        zdb::Type var_type = var_die.value()[DW_AT_type].as_type();
+        zdb::DwarfExpression::result loc = var_die
+            .value()
+            [DW_AT_location]
+            .as_evaluated_location(
+                target.get_process(),
+                target.get_stack().current_frame().regs, 
+                false);
+        
+        auto data_vec = target.read_location_data(
+            loc, 
+            var_type.byte_size()
+        );
+
+        std::optional<zdb::VirtualAddr> address;
+        if (auto single_loc = 
+            std::get_if<zdb::DwarfExpression::simple_location>(&loc)
+        ) {
+            if (auto addr_res =
+                std::get_if<zdb::DwarfExpression::address_result>(single_loc)
+            ) {
+                address = addr_res->address;
+            }
+        }
+        return { std::move(data_vec), var_type, address };
+    }
+
+    std::unique_ptr<zdb::ELF> create_loaded_elf(    
         const zdb::Process &process, 
         const std::filesystem::path &path
     ) {
@@ -516,6 +552,67 @@ namespace zdb {
 
             Error::send("Invalid simple location type");
         }
+    }
+
+    // like: a.b | a->b | a[1] 
+    // 我们不支持 * 或&操作符来解引用和获取地址，因为只使用后缀操作符会大大简化解析;
+    // 可以使用[0]来代替 * 操作符。我们将添加一个变量位置命令，他们可以使用它来代替&操作符
+    TypedData Target::resolve_indirect_name(std::string name, FileAddr pc) const {
+        std::size_t op_pos = name.find_first_of(".-[");
+        std::string var_name = name.substr(0, op_pos);
+        const zdb::Dwarf& dwarf = pc.elf()->get_dwarf();
+        TypedData data = get_initial_variable_data(*this, var_name, pc);
+
+        while (op_pos != std::string::npos) {
+            if (name[op_pos] == '-') {
+                if (name[op_pos + 1] != '>') {
+                    zdb::Error::send("Invalid operator");
+                }
+                data = data.deref_pointer(get_process());
+                op_pos++;
+            }
+
+            if (name[op_pos] == '.' || name[op_pos] == '>') {
+                std::size_t member_name_start = op_pos + 1;
+                op_pos = name.find_first_of(".-[", member_name_start);
+                std::string member_name = name.substr(
+                    member_name_start, 
+                    op_pos - member_name_start
+                );
+                data = data.read_member(get_process(), member_name);
+                name = name.substr(member_name_start);
+            }
+            else if (name[op_pos] == '[') {
+                std::size_t int_end = name.find(']', op_pos);
+                std::string index_str = name.substr(op_pos + 1, int_end - op_pos - 1);
+                std::optional<std::size_t> index = to_integral<std::size_t>(index_str);
+                if (!index) {
+                    zdb::Error::send("Invalid index");
+                }
+                data = data.index(get_process(), *index);
+                name = name.substr(int_end + 1);
+            }
+            op_pos = name.find_first_of(".-[");
+        }
+        return data;
+    }
+
+    std::optional<DIE> Target::find_variable(std::string name, FileAddr pc) const {
+        const zdb::Dwarf &dwarf = pc.elf()->get_dwarf();
+        std::optional<zdb::DIE> local_die = dwarf.find_local_variable(name, pc);
+        if (local_die) {
+            return local_die;
+        }
+        
+        std::optional<DIE> global = std::nullopt;
+        elves_.for_each([&](zdb::ELF& elf) {
+            auto& dwarf = elf.get_dwarf();
+            auto found = dwarf.find_global_variable(name);
+            if (found) {
+                global = *found;
+            }
+        });
+        return global;
     }
 }; // namespace zdb;
 

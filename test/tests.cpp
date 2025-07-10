@@ -15,6 +15,7 @@
 #include <libzdb/elf.hpp>
 #include <libzdb/dwarf.hpp>
 #include <set>
+#include <libzdb/type.hpp>
 
 using namespace zdb;
 
@@ -791,4 +792,26 @@ TEST_CASE("DWARF expressions work", "[dwarf]") {
     REQUIRE(pieces[0].offset == 0);
     REQUIRE(pieces[1].offset == 0);
     REQUIRE(pieces[2].offset == 12);
+}
+
+TEST_CASE("Global variables", "[variable]") {
+    auto target = Target::launch("bin/global_variable");
+    auto& proc = target->get_process();
+    target->create_function_breakpoint("main").enable();
+    proc.resume();
+    proc.wait_on_signal();
+    zdb::TypedData name = target->resolve_indirect_name(
+        "sy.pets[0].name", 
+        target->get_pc_file_address()
+    );
+    auto name_vis = name.visualize(target->get_process());
+    REQUIRE(name_vis == "\"Marshmallow\"");
+
+    auto cats = target->resolve_indirect_name(
+        "cats[1].age", 
+        target->get_pc_file_address()
+    );
+    auto cats_vis = cats.visualize(target->get_process());
+    REQUIRE(cats_vis == "8");
+
 }

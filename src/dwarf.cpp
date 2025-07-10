@@ -1,5 +1,6 @@
 #include <libzdb/dwarf.hpp>
 #include <libzdb/types.hpp>
+#include <libzdb/type.hpp>
 #include <libzdb/bit.hpp>
 #include <string_view>
 #include <algorithm>
@@ -10,6 +11,18 @@
 #include <libzdb/process.hpp>
 
 namespace {
+    void scopes_at_address_in_die(
+        const zdb::DIE& die, 
+        zdb::FileAddr address,
+        std::vector<zdb::DIE>& scopes
+    ) {
+        for (auto& c : die.children()) {
+            if (c.contains_file_address(address)) {
+                scopes_at_address_in_die(c, address, scopes);
+                scopes.push_back(c);
+            }
+        }
+    }
     zdb::VirtualAddr read_frame_base_result(
         const zdb::DwarfExpression::result& loc,
         const zdb::Registers& regs
@@ -1103,6 +1116,10 @@ namespace zdb {
         return LocationList{ *cu_->dwarf_info(), *cu_, data, in_frame_info };
     }
 
+    Type Attr::as_type() const {
+        return zdb::Type{ as_reference() };
+    }
+
     DwarfExpression::result Attr::as_evaluated_location(
         const Process& proc,
         const Registers& regs,
@@ -1450,6 +1467,32 @@ namespace zdb {
         }
 
         return (*this)[DW_AT_decl_line].as_int();
+    }
+
+    std::optional<DIE::bitfield_information> 
+    DIE::get_bitfield_information(std::uint64_t class_byte_size) const {
+        if (!this->contains(DW_AT_bit_offset) 
+            && !this->contains(DW_AT_data_bit_offset)
+        ) {
+            return std::nullopt;
+        }
+
+        std::size_t bit_size = (*this)[DW_AT_bit_size].as_int();
+        std::size_t all_byte_size = this->contains(DW_AT_byte_size) ?
+            (*this)[DW_AT_byte_size].as_int() :
+            class_byte_size;
+        auto all_bit_size = all_byte_size * 8;
+        std::uint8_t bit_offset = 0;
+        if (contains(DW_AT_bit_offset)) {
+            // 从后往前数
+            auto offset_field = (*this)[DW_AT_bit_offset].as_int();
+            bit_offset = all_bit_size - offset_field - bit_size;
+        }
+        if (contains(DW_AT_data_bit_offset)) {
+            // 从前往后数
+            bit_offset = (*this)[DW_AT_data_bit_offset].as_int() % 8;
+        }
+        return bitfield_information{ bit_size, all_bit_size, bit_offset };
     }
 }
 
@@ -1951,6 +1994,31 @@ namespace zdb {
             return parse_die(*it->second.cu, cur);
         }
         return std::nullopt;
+    }
+
+    std::optional<DIE> Dwarf::find_local_variable(std::string name, FileAddr pc) const {
+        std::vector<DIE> scopes = scopes_at_address(pc);
+        for (auto& scope : scopes) {
+            for (auto& child : scope.children()) {
+                auto tag = child.abbrev_entry()->tag;
+                if ((tag == DW_TAG_variable || tag == DW_TAG_formal_parameter)
+                    && child.name() == name
+                ) {
+                    return child;
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::vector<DIE> Dwarf::scopes_at_address(FileAddr address) const {
+        auto func = function_containing_address(address);
+        if (!func) return {};
+
+        std::vector<DIE> scopes;
+        scopes_at_address_in_die(*func, address, scopes);
+        scopes.push_back(*func);
+        return scopes;
     }
 
     std::vector<DIE> Dwarf::inline_stack_at_file_address(FileAddr address) const {

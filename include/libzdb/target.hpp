@@ -25,6 +25,7 @@ namespace zdb {
         Stack frames;
     };
 
+    class TypedData;
     class Target {
       public:
         Target() = delete;
@@ -110,6 +111,9 @@ namespace zdb {
             std::size_t size,
             std::optional<pid_t> otid = std::nullopt
         ) const;
+
+        TypedData resolve_indirect_name(std::string name, FileAddr) const;
+        std::optional<DIE> find_variable(std::string name, FileAddr pc) const;
 
 
       private:

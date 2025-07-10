@@ -14,6 +14,8 @@
 #include <fstream>
 #include <filesystem>
 #include <cmath>
+#include <unordered_set>
+#include <libzdb/type.hpp>
 
 namespace {
     zdb::Process *g_zdb_process = nullptr;
@@ -546,25 +548,109 @@ namespace {
         }
     }
 
+    void handle_variable_locals_command(zdb::Target& target) {
+        zdb::FileAddr pc = target.get_pc_file_address();
+        std::vector<zdb::DIE> dies_at_file_addr = pc.elf()->get_dwarf().scopes_at_address(pc);
+        std::unordered_set<std::string> seen;
+
+        for (zdb::DIE& scope : dies_at_file_addr) {
+            for (auto &child : scope.children()) {
+                std::string name(child.name().value_or(""));
+                auto tag = child.abbrev_entry()->tag;
+                if ((tag == DW_TAG_variable || tag == DW_TAG_formal_parameter)
+                    && !name.empty() && !seen.count(name)
+                ) {
+                    zdb::DwarfExpression::result loc = child[DW_AT_location].as_evaluated_location(
+                        target.get_process(), 
+                        target.get_stack().current_frame().regs, false
+                    );
+                    zdb::Type type = child[DW_AT_type].as_type();
+                    std::vector<std::byte> value = target.read_location_data(loc, type.byte_size());
+                    auto str = zdb::TypedData{ std::move(value), type }
+                        .visualize(target.get_process());
+                    fmt::print("{}: {}\n", name, str);
+                    seen.insert(name);
+                }
+            }
+        }
+    }
+
+    void handle_variable_read_command(
+        zdb::Target& target, 
+        const std::vector<std::string>& args
+    ) {
+        std::string name = args[2];
+        zdb::FileAddr pc = target.get_pc_file_address();
+        zdb::TypedData data = target.resolve_indirect_name(name, pc);
+        std::string str = data.visualize(target.get_process());
+        fmt::print("Value: {}\n", str);
+    }
+
+    void handle_variable_location_command(
+        zdb::Target& target, 
+        const std::vector<std::string>& args
+    ) {
+        std::string name = args[2];
+        zdb::FileAddr pc = target.get_pc_file_address();
+        auto var = target.find_variable(name, pc);
+        if (!var) {
+            std::cerr << "Variable not found\n";
+            return;
+        }
+
+        auto loc = var.value()[DW_AT_location].as_evaluated_location(
+            target.get_process(), 
+            target.get_stack().current_frame().regs, 
+            false
+        );
+        auto print_simple_location = [](auto* loc) {
+            if (auto reg_loc = std::get_if<zdb::DwarfExpression::register_result>(loc)) {
+                auto name = zdb::find_register_info_by_dwarf_id(reg_loc->reg_num).name;
+                fmt::print("Register: {}\n", name);
+            }
+            else if (auto addr_res = std::get_if<zdb::DwarfExpression::address_result>(loc)) {
+                fmt::print("Address: {:#x}\n", addr_res->address.addr());
+            }
+            else {
+                fmt::print("None");
+            }
+        };
+
+        if (auto simple_loc = std::get_if<zdb::DwarfExpression::simple_location>(&loc)) {
+            print_simple_location(simple_loc);
+        }
+        else if (auto pieces_res = std::get_if<zdb::DwarfExpression::pieces_result>(&loc)) {
+            for (auto& piece : pieces_res->pieces) {
+                fmt::print("Piece: offset = {}, bit size = {}, location = ",
+                    piece.offset, 
+                    piece.bit_size
+                );
+                print_simple_location(&piece.location);
+            }
+        }
+    }
+
     void handle_variable_command(zdb::Target& target, const std::vector<std::string>& args) {
+        if (args.size() < 2) {
+            print_help({ "help", "variable" });
+            return;
+        }
+
+        if (is_prefix(args[1], "locals")) {
+            handle_variable_locals_command(target);
+            return;
+        }
+
         if (args.size() < 3) {
             print_help({ "help", "variable" });
             return;
         }
 
         if (is_prefix(args[1], "read")) {
-            auto die = target.get_main_elf().get_dwarf().find_global_variable(args[2]);
-            auto loc = die
-                .value()[DW_AT_location]
-                .as_evaluated_location(
-                    target.get_process(), 
-                    target.get_stack().current_frame().regs, 
-                    false);
-
-            auto value = target.read_location_data(loc, 8);
-            std::uint64_t res = 0;
-            std::copy(value.begin(), value.end(), reinterpret_cast<std::byte*>(&res));
-            std::cout << "Value: " << res << '\n';
+            handle_variable_read_command(target, args);
+        }
+        else if (is_prefix(args[1], "location")) {
+            handle_variable_location_command(target, args);
         }
     }
 

@@ -103,13 +103,13 @@ class ELFCollection {
 
     template <class F>
     void for_each(F f) {
-        for (auto& elf : elves_) {
+        for (std::unique_ptr<zdb::ELF>& elf : elves_) {
             f(*elf);
         }
     }
     template <class F>
     void for_each(F f) const {
-        for (const auto& elf : elves_) {
+        for (const std::unique_ptr<zdb::ELF>& elf : elves_) {
             f(*elf);
         }
     }
