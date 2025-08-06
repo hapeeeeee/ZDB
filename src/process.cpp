@@ -830,3 +830,37 @@ void zdb::Process::populate_existing_threads() {
         threads_.emplace(tid, ThreadState{ tid, Registers(*this, tid) });
     }
 }
+
+zdb::Registers zdb::Process::inferior_call(
+    VirtualAddr func_addr,  // 函数的开始地址
+    VirtualAddr return_addr,// 函数的返回地址
+    const Registers& regs_to_restore, // 调用完成后需要回退的寄存器信息
+    std::optional<pid_t> otid // 可选线程
+) {
+    auto tid = otid.value_or(current_thread_);
+    auto& regs = get_registers(tid);
+
+    regs.write_by_id(RegisterId::rip, func_addr.addr(), true);
+    auto rsp = regs.read_by_id_as<std::uint64_t>(RegisterId::rsp);
+
+    rsp -= 8;
+    write_memory(VirtualAddr{ rsp }, to_byte_span(return_addr.addr()));
+    regs.write_by_id(RegisterId::rsp, rsp, true);
+
+    // 这个函数假设返回地址已经有一个断点设置在它上面，由调用者处理，
+    // 所以此处恢复线程，等待直到它停止，如果它退出，抛出一个异常。
+    resume(tid);
+    auto reason = wait_on_signal(tid);
+    if (reason.reason != ProcessState::Stopped) {
+        zdb::Error::send("Function call failed");
+    }
+
+    // 注意，regs是一个引用，因此，将regs_to_restore赋值给它将执行当前线程的寄存器更新。
+    auto new_regs = regs;
+    regs = regs_to_restore;
+    regs.flush();
+    if (target_) target_->notify_stop(reason);
+
+    // 最后，我们返回调用后的寄存器状态
+    return new_regs;
+}

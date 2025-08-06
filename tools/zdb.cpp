@@ -581,8 +581,8 @@ namespace {
     ) {
         std::string name = args[2];
         zdb::FileAddr pc = target.get_pc_file_address();
-        zdb::TypedData data = target.resolve_indirect_name(name, pc);
-        std::string str = data.visualize(target.get_process());
+        auto data = target.resolve_indirect_name(name, pc);
+        std::string str = data.variable->visualize(target.get_process());
         fmt::print("Value: {}\n", str);
     }
 
@@ -950,7 +950,14 @@ namespace {
             handle_thread_command(*target, args);
         } else if (is_prefix(command, "variable")) {
             handle_variable_command(*target, args);
-        } else if (is_prefix(command, "step")) {
+        } else if (is_prefix(command, "expression")) {
+            auto expr = line.substr(line.find(' ') + 1);
+            auto ret = target->evaluate_expression(expr);
+            if (ret) {
+                auto str = ret->return_value.visualize(target->get_process());
+                fmt::print("${}: {}\n", ret->id, str);
+            }
+        }else if (is_prefix(command, "step")) {
             auto reason = target->step_in();
             handle_stop(*target, reason);
         } else if (is_prefix(command, "stepi")) {

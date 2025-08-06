@@ -15,6 +15,7 @@
 #include <libzdb/stack.hpp>
 #include <libzdb/breakpoint.hpp>
 #include <link.h>
+#include <libzdb/type.hpp>
 
 
 namespace zdb {
@@ -112,8 +113,24 @@ namespace zdb {
             std::optional<pid_t> otid = std::nullopt
         ) const;
 
-        TypedData resolve_indirect_name(std::string name, FileAddr) const;
+        struct resolve_indirect_name_result {
+          std::optional<TypedData> variable;
+          std::vector<DIE> funcs;
+        };
+        resolve_indirect_name_result resolve_indirect_name(std::string name, FileAddr) const;
         std::optional<DIE> find_variable(std::string name, FileAddr pc) const;
+        VirtualAddr inferior_malloc(std::size_t size);
+
+        // 表达式计算结果、入口
+        struct evaluate_expression_result {
+          std::uint64_t id; // 结果的id, 用户可以通过$1以查询历史结果
+          TypedData return_value;
+        };
+        std::optional<evaluate_expression_result> evaluate_expression(
+          std::string_view expr,
+          std::optional<pid_t> otid = std::nullopt
+        );
+        const TypedData& get_expression_result(std::size_t i) const;
 
 
       private:
@@ -136,6 +153,7 @@ namespace zdb {
         StoppointCollection<Breakpoint> breakpoints_;
         VirtualAddr dynamic_linker_rendezvous_address_;
         std::unordered_map<pid_t, Thread> threads_;
+        mutable std::vector<TypedData> expression_results_;
     };
 }
 

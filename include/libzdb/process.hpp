@@ -201,9 +201,16 @@ namespace zdb {
         pid_t current_thread() const { return current_thread_; }
         std::unordered_map<pid_t, ThreadState>& thread_states() { return threads_; }
         const std::unordered_map<pid_t, ThreadState>& thread_states() const { return threads_; }
-		void install_thread_lifecycle_callback(std::function<void(const StopReason&)> callback) {
-			thread_lifecycle_callback_ = std::move(callback);
-		}
+        void install_thread_lifecycle_callback(std::function<void(const StopReason&)> callback) {
+          thread_lifecycle_callback_ = std::move(callback);
+        }
+
+        Registers inferior_call(
+          VirtualAddr func_addr,  // 函数的开始地址
+          VirtualAddr return_addr,// 函数的返回地址
+          const Registers& regs_to_restore, // 调用完成后需要回退的寄存器信息
+          std::optional<pid_t> otid = std::nullopt // 可选线程
+        );
 
       private:
         pid_t pid_             = 0;

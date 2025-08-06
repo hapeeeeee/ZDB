@@ -588,6 +588,9 @@ namespace zdb {
         std::optional<bitfield_information> 
         get_bitfield_information(std::uint64_t class_byte_size) const;
 
+        // 这个函数只在DIE代表函数时起作用，返回所有函数参数的类型
+        // 旨在处理函数重载（函数重名）的情况
+        std::vector<Type> parameter_types() const; 
 
       private:
         const std::byte* pos_ = nullptr;
@@ -768,6 +771,7 @@ namespace zdb {
         std::optional<DIE> find_local_variable(std::string name, FileAddr pc) const;
         std::vector<DIE> scopes_at_address(FileAddr address) const;
         std::vector<DIE> inline_stack_at_file_address(FileAddr address) const;
+        std::optional<DIE> get_member_function_definition(const zdb::DIE& declaration) const;
 
         const std::unordered_map<std::uint64_t, Abbrev> &get_abbrev_table(std::size_t offset);
         const std::vector<std::unique_ptr<CompileUnit>> &compile_units() const { return compile_units_; }
@@ -789,6 +793,7 @@ namespace zdb {
         };
         mutable std::unordered_multimap<std::string, index_entry> function_index_;
         mutable std::unordered_multimap<std::string, index_entry> global_variable_index_;
+        mutable std::unordered_map<const std::byte*, index_entry> member_function_index_;
 
       private:
         const ELF *elf_;

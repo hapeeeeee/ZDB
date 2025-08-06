@@ -1494,6 +1494,21 @@ namespace zdb {
         }
         return bitfield_information{ bit_size, all_bit_size, bit_offset };
     }
+
+    std::vector<Type> DIE::parameter_types() const {
+        std::vector<Type> result;
+        if (!(abbrev_->tag == DW_TAG_subprogram)) {
+            return result;
+        }
+
+        for (auto& child : children()) {
+            if (child.abbrev_entry()->tag == DW_TAG_formal_parameter) {
+                result.push_back(child[DW_AT_type].as_type());
+            }
+        }
+
+        return result;
+    }
 }
 
 // For RangeList
@@ -2047,6 +2062,22 @@ namespace zdb {
         return inline_stack;
     }
 
+    std::optional<DIE> Dwarf::get_member_function_definition(
+        const zdb::DIE& declaration
+    ) const {
+        index();
+        auto it = member_function_index_.find(declaration.position());
+        if (it != member_function_index_.end()) {
+            Cursor cur({ it->second.pos, it->second.cu->data().end() });
+            DIE die = parse_die(*it->second.cu, cur);
+            if (die.contains(DW_AT_low_pc) || die.contains(DW_AT_ranges)) {
+                return die;
+            }
+            return get_member_function_definition(die);
+        }
+        return std::nullopt;
+    }
+
     void Dwarf::index() const {
         if (!function_index_.empty()) {
             return;
@@ -2060,12 +2091,45 @@ namespace zdb {
         bool has_range = 
             current.contains(DW_AT_low_pc) || current.contains(DW_AT_ranges);
 
-        bool is_function = 
-            current.abbrev_entry()->tag == DW_TAG_subprogram || current.abbrev_entry()->tag == DW_TAG_inlined_subroutine;
+        bool is_function = current.abbrev_entry()->tag == DW_TAG_subprogram 
+            || current.abbrev_entry()->tag == DW_TAG_inlined_subroutine;
+
+        // 处理普通函数
         if (has_range && is_function) {
             if (auto name = current.name(); name) {
                 index_entry entry{ current.cu(), current.position() };
                 function_index_.emplace(*name, entry);
+            }
+        }
+
+        // 处理成员函数
+        // 简单的情况：
+        //  - 函数的definition DIE 有`DW_AT_specification`属性，直接指向 Declaration DIE。
+        // 复杂的情况:
+        //  - 编译器为了支持一些高级功能（比如内联优化），会把一个函数的定义信息分散在两个
+        //      甚至更多的DIE中。
+        //      最底层是一个 Concrete definition DIE，它包含了一些具体的信息。
+        //      它通过 DW_AT_abstract_origin 属性，指向一个 Partial definition DIE，
+        //      然后，这个 Partial definition DIE 再通过 DW_AT_specification 属性，
+        //      指向最顶层的 Declaration DIE。
+        if (is_function) {
+            if (current.contains(DW_AT_specification)) {
+                index_entry entry{ current.cu(), current.position() };
+                member_function_index_.insert(
+                    std::make_pair(
+                        current[DW_AT_specification].as_reference().position(), 
+                        entry
+                    )
+                );
+            }
+            else if (current.contains(DW_AT_abstract_origin)) {
+                index_entry entry{ current.cu(), current.position() };
+                member_function_index_.insert(
+                    std::make_pair(
+                        current[DW_AT_abstract_origin].as_reference().position(), 
+                        entry
+                    )
+                );
             }
         }
 

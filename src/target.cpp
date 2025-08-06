@@ -6,10 +6,433 @@
 #include <libzdb/disassembler.hpp>
 #include <cxxabi.h>
 #include <fstream>
-
+#include <iostream>
 namespace {
+    // 用户能够在计算表达式后引用带有编号变量的返回值，如$0和$1。返回值的内存必须在
+    // 调试会话的剩余时间内保持不变。 因此此处需要动态分配内存（堆上）。
+    // 如果返回值确实具有MEMORY类，则计算器将传递一个指针，指向已分配好的存储内存地址
+    // 否则，返回值存储在寄存器中，
+    // read_return_value的工作是将数据复制到分配的存储中，以便用户以后可以访问它。
+    zdb::TypedData read_return_value(
+        zdb::Target& target,            // 调试目标（包含进程等信息）
+        zdb::DIE func,                  // 表示当前函数的调试信息
+        zdb::VirtualAddr return_slot,   // 返回值要存放的地址
+        zdb::Registers& regs            // 当前函数返回后的寄存器快照
+    ) {
+        auto ret_type = func[DW_AT_type].as_type();
+        auto ret_classes = ret_type.get_parameter_classes();
+
+        bool used_int = false;
+        bool used_sse = false;
+
+        // 如果返回类型是内存参数，则返回值已经在内存中，直接读出打包返回
+        if (ret_classes[0] == zdb::ParameterClass::memory) {
+            auto value = target.get_process().read_memory(
+                return_slot, 
+                ret_type.byte_size()
+            );
+            return { 
+                std::move(value), 
+                func[DW_AT_type].as_type(), 
+                return_slot 
+            };
+        }
+
+        // 如果是long double，读取浮点寄存器，写入内存，再打包返回
+        if (ret_classes[0] == zdb::ParameterClass::x87) {
+            auto data = regs.read_by_id_as<long double>(zdb::RegisterId::st0);
+            auto value = zdb::to_byte_vec(data);
+            target.get_process().write_memory(return_slot, value);
+            return {
+                std::move(value), 
+                func[DW_AT_type].as_type(), 
+                return_slot 
+            };
+        }
+
+        std::vector<std::byte> value;
+        for (auto &ret_class : ret_classes) {
+            if (ret_class == zdb::ParameterClass::integer) {
+                // 第一个 integer 类型的返回值来自 rax，第二个来自 rdx（System V ABI）。
+                auto reg = used_int ? 
+                    zdb::RegisterId::rdx: 
+                    zdb::RegisterId::rax;
+                used_int = true;
+                std::uint64_t data = regs.read_by_id_as<std::uint64_t>(reg);
+                auto new_value = zdb::to_byte_vec(data);
+                value.insert(value.end(), new_value.begin(), new_value.end());
+            }
+            else if (ret_class == zdb::ParameterClass::sse) {
+                auto reg = used_sse ? 
+                    zdb::RegisterId::xmm1: 
+                    zdb::RegisterId::xmm0;
+                used_sse = true;
+                auto data = regs.read_by_id_as<zdb::byte128>(reg);
+                value = { data.begin(), data.end() };
+                target.get_process().write_memory(return_slot, value);
+
+            }
+            else if (ret_class != zdb::ParameterClass::no_class) {
+                zdb::Error::send("Unsupported return type");
+            }
+        }
+
+        target.get_process().write_memory(return_slot, value);
+        return {
+            std::move(value), 
+            func[DW_AT_type].as_type(), 
+            return_slot 
+        };
+    }
+
+    void setup_arguments(
+        zdb::Target& target, 
+        zdb::DIE func,
+        std::vector<zdb::TypedData> args,
+        zdb::Registers& regs,
+        std::optional<zdb::VirtualAddr> return_slot // 函数的返回地址
+    ) {
+        std::array<zdb::RegisterId, 6> int_regs = {
+            zdb::RegisterId::rdi,
+            zdb::RegisterId::rsi,
+            zdb::RegisterId::rdx,
+            zdb::RegisterId::rcx,
+            zdb::RegisterId::r8,
+            zdb::RegisterId::r9
+        };
+
+        std::array<zdb::RegisterId, 8> sse_regs = {
+            zdb::RegisterId::xmm0,
+            zdb::RegisterId::xmm1,
+            zdb::RegisterId::xmm2,
+            zdb::RegisterId::xmm3,
+            zdb::RegisterId::xmm4,
+            zdb::RegisterId::xmm5,
+            zdb::RegisterId::xmm6,
+            zdb::RegisterId::xmm7
+        };
+
+        int current_int_reg = 0;
+        int current_sse_reg = 0;
+        struct stack_arg {
+            zdb::TypedData data;
+            std::size_t size;
+        };
+        auto stack_args = std::vector<stack_arg>{};
+        std::uint64_t rsp = regs.read_by_id_as<std::uint64_t>(zdb::RegisterId::rsp);
+        auto round_up_to_eightbyte = [](std::size_t size) {
+            return (size + 7) & ~7;
+        };
+
+        if (func.contains(DW_AT_type)) {
+            auto ret_type = func[DW_AT_type].as_type();
+            auto ret_class = ret_type.get_parameter_classes()[0];
+            // 提前分配内存，并把内存地址放进第一个整数寄存器里。
+            if (ret_class == zdb::ParameterClass::memory) {
+                current_int_reg++;
+                regs.write_by_id(int_regs[0], return_slot->addr(), true);
+            }
+        }
+
+        auto params = func.parameter_types();
+        for (auto i = 0; i < params.size(); ++i) {
+            zdb::Type& param = params[i];
+            auto param_classes = param.get_parameter_classes();
+            // 如果是引用类型，就需要传地址给函数，而不是传值。
+            if (param.is_reference_type()) {
+                if (args[i].address()) {
+                    // 如果参数已经有地址（说明它在内存中），直接取地址作为参数
+                    args[i] = zdb::TypedData {
+                        zdb::to_byte_vec(*args[i].address()),
+                        zdb::BuiltinType::integer 
+                    };
+                }
+                else {
+                    // 否则我们得手动把值拷贝到栈上，再传这个拷贝的地址
+                    rsp -= args[i].value_type().byte_size();
+                    rsp &= ~(args[i].value_type().alignment() - 1); // 对齐
+                    target.get_process().write_memory(
+                        zdb::VirtualAddr{ rsp }, args[i].data()
+                    );
+
+                    args[i] = zdb::TypedData{
+                        zdb::to_byte_vec(rsp),
+                        zdb::BuiltinType::integer 
+                    };
+                }
+
+            }
+        }
+
+
+        // 分配参数到堆栈和寄存器
+        for (auto i = 0; i < params.size(); ++i) {
+            zdb::TypedData& arg = args[i];
+            zdb::Type& param = params[i];
+            auto param_classes = param.get_parameter_classes();
+            std::size_t param_size = param.byte_size();
+
+            auto required_int_regs = std::count(
+                param_classes.begin(), 
+                param_classes.end(),
+                zdb::ParameterClass::integer
+            );
+            auto required_sse_regs = std::count(
+                param_classes.begin(), 
+                param_classes.end(),
+                zdb::ParameterClass::sse
+            );
+            // 如果有任意一个寄存器数量不够，或者根本不使用寄存器，把参数放到栈上。
+            if (current_int_reg + required_int_regs > int_regs.size()
+                || current_sse_reg + required_sse_regs > sse_regs.size()
+                || (required_int_regs == 0 && required_sse_regs == 0)
+            ) {
+                auto size = round_up_to_eightbyte(param_size);
+                stack_args.push_back({ args[i], size });
+            }
+            else {
+                // 使用寄存器传参，八字节一组
+                for (auto i = 0; i < param_size; i += 8) {
+                    zdb::RegisterId reg;
+                    switch (param_classes[i / 8]) {
+                        case zdb::ParameterClass::integer:
+                            reg = int_regs[current_int_reg++];
+                            break;
+                        case zdb::ParameterClass::sse:
+                            reg = sse_regs[current_sse_reg++];
+                            break;
+                        case zdb::ParameterClass::no_class:
+                            break;
+                        default:
+                            zdb::Error::send("Unsupported parameter class");
+                    }
+
+                    zdb::byte64 data;
+                    std::copy(
+                        arg.data().begin() + i,
+                        arg.data().begin() + i + 8,
+                        data.begin()
+                    );
+                    regs.write_by_id(reg, data, true);
+
+                }
+            }
+        }
+
+        for (auto& [_,size] : stack_args) {
+            rsp -= size;
+        }
+        rsp &= ~0xf; // SYSV ABI要求堆栈参数末尾的地址与16字节边界对齐
+        uint64_t start_pos = rsp;
+
+        for (auto& [arg,size] : stack_args) {
+            target.get_process().write_memory(
+                zdb::VirtualAddr{ start_pos }, 
+                arg.data()
+            );
+            start_pos += size;
+        }
+
+        regs.write_by_id(zdb::RegisterId::rax, current_sse_reg, true);
+        regs.write_by_id(zdb::RegisterId::rsp, rsp, true);
+    } 
+
+    zdb::TypedData parse_single_augment(
+        zdb::Target& target, 
+        pid_t tid, 
+        std::string_view arg
+    ) {
+        if (arg.empty()) {
+            zdb::Error::send("Empty augment");
+        }
+
+        if (arg.size() > 2 && arg[0] == '"' && arg[arg.size() - 1] == '"') {
+            auto ptr = target.inferior_malloc(arg.size() - 1);
+            std::string arg_str{ arg.substr(1, arg.size() - 2) };
+            auto data_ptr = reinterpret_cast<const std::byte*>(arg_str.data());
+            zdb::Span<const std::byte> data = { data_ptr, arg_str.size() + 1 };
+            target.get_process().write_memory(ptr, data);
+            return { zdb::to_byte_vec(ptr), zdb::BuiltinType::string };
+        } 
+        else if (arg == "true" || arg == "false") {
+            auto value = arg == "true";
+            return { zdb::to_byte_vec(value), zdb::BuiltinType::boolean };
+        }
+        else if (arg[0] == '\'') {
+            if (arg.size() != 3 || arg[2] != '\'') {
+                zdb::Error::send("Invalid character literal");
+            }
+            return { zdb::to_byte_vec(arg[1]), zdb::BuiltinType::character };
+        }
+        else if (arg[0] == '-' || std::isdigit(arg[0])) {
+            if (arg.find(".") != std::string::npos) {
+                auto value = zdb::to_float<double>(arg);
+                if (!value) {
+                    zdb::Error::send("Invalid floating point literal");
+                }
+                return { zdb::to_byte_vec(*value), zdb::BuiltinType::floating_point };
+            } else {
+                auto value = zdb::to_integral<std::uint64_t>(arg);
+                if (!value) {
+                    zdb::Error::send("Invalid Integer literal");
+                }
+                return { zdb::to_byte_vec(*value), zdb::BuiltinType::integer };
+            }
+        }
+        else {
+            auto pc = target.get_pc_file_address(tid);
+            auto res = target.resolve_indirect_name(std::string(arg), pc);
+            if (!res.funcs.empty()) {
+                zdb::Error::send("Nested function calls not supported");
+            }
+            return *res.variable;
+        }
+    }
+
+    std::optional<zdb::TypedData> inferior_call_from_dwarf(
+        zdb::Target& target, 
+        zdb::DIE func,
+        const std::vector<zdb::TypedData>& args,
+        zdb::VirtualAddr return_addr, 
+        pid_t tid
+    ) {
+        auto& regs = target.get_process().get_registers(tid);
+        auto saved_regs = regs;
+
+        zdb::VirtualAddr call_addr;
+        if (func.contains(DW_AT_low_pc) || func.contains(DW_AT_ranges)) {
+            call_addr = func.low_pc().to_virt_addr();
+        }
+        else {
+            auto def = func
+                .cu()
+                ->dwarf_info()
+                ->get_member_function_definition(func);
+            if (!def) {
+                zdb::Error::send("No function definition found");
+            }
+            call_addr = def->low_pc().to_virt_addr();
+        }
+
+        // 为函数返回值分配空间
+        std::optional<zdb::VirtualAddr> return_slot;
+        if (func.contains(DW_AT_type)) {
+            auto ret_type = func[DW_AT_type].as_type();
+            return_slot = target.inferior_malloc(ret_type.byte_size());
+        }
+
+        setup_arguments(target, func, args, regs, return_slot);
+        auto new_regs = target.get_process().inferior_call(
+            call_addr, 
+            return_addr, 
+            saved_regs, 
+            tid
+        );
+
+        if (func.contains(DW_AT_type)) {
+            return read_return_value(
+                target, 
+                func, 
+                *return_slot, 
+                new_regs
+            );
+        }
+        return std::nullopt;
+    }
+
+    std::vector<zdb::TypedData> collect_arguments(
+        zdb::Target& target, 
+        pid_t tid, 
+        std::string_view arg_string,
+        const std::vector<zdb::DIE>& funcs,
+        std::optional<zdb::TypedData> object // this指针
+    ) {
+        // 一个函数是成员函数，它会带有一个 DW_AT_object_pointer 属性。
+        // 这个属性指向 this 参数对应的 DIE（即 formal parameter DIE）。
+        // 这个 DIE 描述了 this 参数，包括它的类型。
+        std::vector<zdb::TypedData> args;
+        auto& proc = target.get_process();
+        if (object) {
+            std::vector<std::byte> data;
+            if (object->address()) { 
+                data = zdb::to_byte_vec(*object->address());
+            }
+            else {
+                auto& regs = proc.get_registers(tid);
+                auto rsp = regs.read_by_id_as<std::uint64_t>(zdb::RegisterId::rsp);
+                rsp -= object->value_type().byte_size();
+                proc.write_memory(zdb::VirtualAddr{ rsp }, object->data());
+                regs.write_by_id(zdb::RegisterId::rsp, rsp, true);
+                data = zdb::to_byte_vec(rsp);
+            }
+            auto obj_ptr_die = funcs[0][DW_AT_object_pointer].as_reference();
+            auto this_type = obj_ptr_die[DW_AT_type].as_type();
+            args.push_back({ std::move(data), this_type });
+        }
+        
+        auto args_start = 1;
+        auto args_end = arg_string.find(')');
+        while (args_start < args_end) {
+            auto comma_pos = arg_string.find(',', args_start);
+            if (comma_pos == std::string::npos) {
+                comma_pos = args_end;
+            }
+        
+            auto arg_expr = arg_string.substr(args_start, comma_pos - args_start);
+            args.push_back(parse_single_augment(target, tid, arg_expr));
+            args_start = comma_pos + 1;
+        }
+        return args;
+    }
+
+    zdb::DIE resolve_overload(
+        const std::vector<zdb::DIE>& funcs,
+        const std::vector<zdb::TypedData> args
+    ) {
+        std::optional<zdb::DIE> matched_func;
+        for (auto& func : funcs) {
+            bool is_matched_this_time = true;
+            std::vector<zdb::Type> param_types = func.parameter_types();
+            if (param_types.size() == args.size()) {
+                auto param_it = param_types.begin();
+                auto arg_it = args.begin();
+                for (; arg_it != args.end(); ++param_it, ++arg_it) {
+                    if (*param_it != arg_it->value_type()) {
+                        is_matched_this_time = false;
+                        break;
+                    }
+                }
+            } else {
+                is_matched_this_time = false;
+            }
+
+            if (is_matched_this_time) {
+                if (matched_func) {
+                    zdb::Error::send("Ambiguous function call");
+                }
+                matched_func = func;
+            }
+        }
+
+        if (!matched_func) {
+            zdb::Error::send("No matching function");
+        }
+        return *matched_func;
+    }
+
     zdb::TypedData get_initial_variable_data(
-    const zdb::Target& target, std::string name, zdb::FileAddr pc) {
+        const zdb::Target& target, 
+        std::string name, 
+        zdb::FileAddr pc
+    ) {
+        if (name[0] == '$') {
+            auto index = zdb::to_integral<std::size_t>(name.substr(1));
+            if (!index) {
+                zdb::Error::send("Invalid expression result index");
+            }
+            return target.get_expression_result(*index);
+        }
+
         std::optional<zdb::DIE> var_die = target.find_variable(name, pc);
         if (!var_die) {
             zdb::Error::send("Variable not found");
@@ -324,7 +747,6 @@ zdb::StopReason zdb::Target::step_out(std::optional<pid_t> otid) {
     return reason;
 }
 
-// find_functions_result find_functions(std::string name) const;
 zdb::Target::find_functions_result zdb::Target::find_functions(std::string name) const {
     find_functions_result result;
     elves_.for_each([&](zdb::ELF& elf) {
@@ -557,8 +979,15 @@ namespace zdb {
     // like: a.b | a->b | a[1] 
     // 我们不支持 * 或&操作符来解引用和获取地址，因为只使用后缀操作符会大大简化解析;
     // 可以使用[0]来代替 * 操作符。我们将添加一个变量位置命令，他们可以使用它来代替&操作符
-    TypedData Target::resolve_indirect_name(std::string name, FileAddr pc) const {
-        std::size_t op_pos = name.find_first_of(".-[");
+    Target::resolve_indirect_name_result 
+    Target::resolve_indirect_name(std::string name, FileAddr pc) const {
+        std::size_t op_pos = name.find_first_of(".-[(");
+        if (name[op_pos] == '(') {
+            auto func_name = name.substr(0, op_pos);
+            auto funcs = find_functions(func_name);
+            return { std::nullopt, std::move(funcs.dwarf_functions) };
+        }
+
         std::string var_name = name.substr(0, op_pos);
         const zdb::Dwarf& dwarf = pc.elf()->get_dwarf();
         TypedData data = get_initial_variable_data(*this, var_name, pc);
@@ -574,11 +1003,30 @@ namespace zdb {
 
             if (name[op_pos] == '.' || name[op_pos] == '>') {
                 std::size_t member_name_start = op_pos + 1;
-                op_pos = name.find_first_of(".-[", member_name_start);
+                op_pos = name.find_first_of(".-[(", member_name_start);
                 std::string member_name = name.substr(
                     member_name_start, 
                     op_pos - member_name_start
                 );
+
+                if (name[op_pos] == '(') {
+                    std::vector<DIE> funcs;
+                    zdb::Type striped_data = data.value_type().strip_cvref_typedef();
+                    for (auto& child : data.value_type().get_die().children()) {
+                        if (child.abbrev_entry()->tag == DW_TAG_subprogram
+                            && child.name() == member_name
+                            && child.contains(DW_AT_object_pointer)
+                        ) {
+                            funcs.push_back(child);
+                        }
+                    }
+
+                    if (funcs.empty()) {
+                        Error::send("No such member function");
+                    }
+                    return { std::move(data), std::move(funcs) };
+                }
+
                 data = data.read_member(get_process(), member_name);
                 name = name.substr(member_name_start);
             }
@@ -592,9 +1040,9 @@ namespace zdb {
                 data = data.index(get_process(), *index);
                 name = name.substr(int_end + 1);
             }
-            op_pos = name.find_first_of(".-[");
+            op_pos = name.find_first_of(".-[(,");
         }
-        return data;
+        return { std::move(data), {} };
     }
 
     std::optional<DIE> Target::find_variable(std::string name, FileAddr pc) const {
@@ -613,6 +1061,109 @@ namespace zdb {
             }
         });
         return global;
+    }
+
+    VirtualAddr Target::inferior_malloc(std::size_t size) {
+        auto saved_regs = process_->get_registers();
+
+        // 我们找到malloc的定义，它位于libc实现中。假设用户没有使用libc的调试版本，
+        // 所以Target::find_functions将在ELF符号表中找到它，而不是在DWARF信息中。
+        // 如果希望支持libc的调试版本，可以同时检查这两个选项。
+        auto candidate_malloc_funcs = find_functions("malloc").elf_functions;
+        auto malloc_func = std::find_if(
+            candidate_malloc_funcs.begin(), 
+            candidate_malloc_funcs.end(), 
+            [](std::pair<const ELF*, const Elf64_Sym*>& sym) {
+                return sym.second->st_value != 0;
+            }
+        );
+
+        if (malloc_func == candidate_malloc_funcs.end()) {
+            zdb::Error::send("malloc not found");
+        }
+
+        FileAddr malloc_func_addr{*malloc_func->first, malloc_func->second->st_value};
+        VirtualAddr malloc_call_addr = malloc_func_addr.to_virt_addr();
+        VirtualAddr entry_addr{process_->get_auxv()[AT_ENTRY]};
+        breakpoints_.get_by_address(entry_addr).install_hit_handler([&] {
+            return false;
+        });
+
+        // malloc(size),将第一个参数size 写入rdi寄存器
+        process_->get_registers().write_by_id(RegisterId::rdi, size, true);
+        auto new_regs = process_->inferior_call(
+            malloc_call_addr, 
+            entry_addr, 
+            saved_regs
+        );
+
+        auto result = new_regs.read_by_id_as<std::uint64_t>(RegisterId::rax);
+        return VirtualAddr{ result };
+    }
+
+
+    std::optional<Target::evaluate_expression_result> Target::evaluate_expression(
+        std::string_view expr,
+        std::optional<pid_t> otid
+    ) {
+        auto tid = otid.value_or(process_->current_thread());
+        auto pc = get_pc_file_address(tid);
+        auto paren_pos = expr.find('(');
+        if (paren_pos == std::string::npos) {
+            zdb::Error::send("Invalid expression");
+        }
+        std::string name{ expr.substr(0, paren_pos + 1) };
+        auto [variable, funcs] = resolve_indirect_name(name, pc);
+        if (funcs.empty()) {
+            zdb::Error::send("Invalid expression");
+        }
+
+        auto entry_point = VirtualAddr{ process_->get_auxv()[AT_ENTRY] };
+        breakpoints_.get_by_address(entry_point).install_hit_handler([&] {
+            return false;
+        });
+
+        auto arg_string = expr.substr(paren_pos);
+        auto args = collect_arguments(
+            *this, 
+            tid, 
+            arg_string, 
+            funcs, 
+            variable
+        );
+        auto func = resolve_overload(funcs, args);
+        auto ret = inferior_call_from_dwarf(
+            *this, 
+            func, 
+            args, 
+            entry_point, 
+            tid
+        );
+
+        if (ret) {
+            expression_results_.push_back(*ret);
+            return evaluate_expression_result{
+                expression_results_.size() - 1,
+                std::move(*ret)
+            };
+        }
+        return std::nullopt;
+    }
+
+    const TypedData& Target::get_expression_result(std::size_t i) const {
+        auto& res = expression_results_[i];
+        auto new_data = process_->read_memory(
+            *res.address(), 
+            res.value_type().byte_size()
+        );
+
+        res = TypedData {
+            std::move(new_data), 
+            res.value_type(), 
+            res.address() 
+        };
+        return res;
+        
     }
 }; // namespace zdb;
 

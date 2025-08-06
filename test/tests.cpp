@@ -800,18 +800,61 @@ TEST_CASE("Global variables", "[variable]") {
     target->create_function_breakpoint("main").enable();
     proc.resume();
     proc.wait_on_signal();
-    zdb::TypedData name = target->resolve_indirect_name(
+    auto name = target->resolve_indirect_name(
         "sy.pets[0].name", 
         target->get_pc_file_address()
     );
-    auto name_vis = name.visualize(target->get_process());
+    auto name_vis = name.variable->visualize(target->get_process());
     REQUIRE(name_vis == "\"Marshmallow\"");
 
     auto cats = target->resolve_indirect_name(
         "cats[1].age", 
         target->get_pc_file_address()
     );
-    auto cats_vis = cats.visualize(target->get_process());
+    auto cats_vis = cats.variable->visualize(target->get_process());
     REQUIRE(cats_vis == "8");
 
+}
+
+
+TEST_CASE("Local variables", "[variable]") {
+    auto dev_null = open("/dev/null", O_WRONLY);
+    auto target = Target::launch("bin/blocks", dev_null);
+    auto& proc = target->get_process();
+    target->create_function_breakpoint("main").enable();
+    proc.resume();
+    proc.wait_on_signal();
+
+    target->step_over();
+    auto var_data = target->resolve_indirect_name("i", target->get_pc_file_address());
+    REQUIRE(from_bytes_as<std::uint32_t>(var_data.variable->data_ptr()) == 1);
+    target->step_over();
+    target->step_over();
+    var_data = target->resolve_indirect_name("i", target->get_pc_file_address());
+    REQUIRE(from_bytes_as<std::uint32_t>(var_data.variable->data_ptr()) == 2);
+    target->step_over();
+    target->step_over();
+    var_data = target->resolve_indirect_name("i", target->get_pc_file_address());
+    REQUIRE(from_bytes_as<std::uint32_t>(var_data.variable->data_ptr()) == 3);
+    close(dev_null);
+}
+
+TEST_CASE("Member pointers", "[variable]") {
+    auto target = Target::launch("bin/member_pointer");
+    auto& proc = target->get_process();
+    target->create_line_breakpoint("member_pointer.cpp", 10).enable();
+    proc.resume();
+    proc.wait_on_signal();
+    auto data_ptr = target->resolve_indirect_name(
+        "data_ptr", 
+        target->get_pc_file_address()
+    );
+    auto data_vis = data_ptr.variable->visualize(proc);
+    REQUIRE(data_vis == "0x0");
+    auto func_ptr = target->resolve_indirect_name(
+        "func_ptr", 
+        target->get_pc_file_address()
+    );
+    auto func_vis = func_ptr.variable->visualize(proc);
+    REQUIRE(func_vis != "0x0");
 }

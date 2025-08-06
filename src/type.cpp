@@ -146,6 +146,197 @@ namespace {
         result += indent + "}";
         return result;
     }
+
+
+    // 如果类型大于8个八字节或包含未与预期边界对齐的字段，则将其指定为MEMORY类。
+    // 该类的每个八字节都单独分类。属于给定八字节的每个字段都将按照以下规则分类
+    // 并合并到该八字节的单个类中，这些规则从上到下运行：
+    //  - 如果两个类相同，则结果是这个类。
+    //  - 如果其中一个类为NO_CLASS，则结果为另一个类。
+    //  - 如果其中一个类是MEMORY，则结果是MEMORY。
+    //  - 如果其中一个类是INTEGER，则结果是INTEGER。
+    //  - 如果其中一个类是X87、X87UP或COMPLEX_X87，则结果是MEMORY。
+    //  - 除此之外，返回SSE
+    zdb::ParameterClass merge_parameter_classes(
+        zdb::ParameterClass lhs, 
+        zdb::ParameterClass rhs
+    ) {
+        using namespace zdb;
+        if (lhs == rhs) return lhs;
+        if (lhs == ParameterClass::no_class) return rhs;
+        if (rhs == ParameterClass::no_class) return lhs;
+        if (lhs == ParameterClass::memory
+            || rhs == ParameterClass::memory
+        ) {
+            return ParameterClass::memory;
+        }
+
+        if (lhs == ParameterClass::integer
+            || rhs == ParameterClass::integer
+        ) {
+            return ParameterClass::integer;
+        }
+
+        if (lhs == ParameterClass::x87
+            || rhs == ParameterClass::x87
+            || lhs == ParameterClass::x87up
+            || rhs == ParameterClass::x87up
+            || lhs == ParameterClass::complex_x87
+            || rhs == ParameterClass::complex_x87
+        ) {
+            return ParameterClass::memory;
+        }
+
+        return ParameterClass::sse;
+    }
+
+    void classify_class_field(
+        const zdb::Type& type,
+        const zdb::DIE& field,
+        std::array<zdb::ParameterClass, 2>& classes,
+        int bit_offset
+    ) {
+        auto bitfield_info = field.get_bitfield_information(type.byte_size());
+        auto field_type = field[DW_AT_type].as_type();
+
+        auto all_byte_size = bitfield_info ? 
+            bitfield_info->bit_size:
+            field_type.byte_size();
+        
+        auto current_bit_offset = bitfield_info ?
+            bitfield_info->bit_offset + bit_offset:
+            field[DW_AT_data_member_location].as_int() * 8 + bit_offset;
+
+        // current_eight_index只会是0或者1，因为大于16字节的类类型，
+        // 在classify_class_type被设置为了2个memory类型
+        auto current_eight_index = current_bit_offset / 64;
+
+        if (field_type.is_class_type()) {
+            for (auto child : field_type.get_die().children()) {
+                if (child.abbrev_entry()->tag == DW_TAG_member
+                    && (child.contains(DW_AT_data_member_location)
+                    || child.contains(DW_AT_data_bit_offset))
+                ) {
+                    classify_class_field(type, child, classes, current_bit_offset);
+                }
+            }
+        } else {
+            auto field_class = field_type.get_parameter_classes();
+            // current_eight_index只会是0或者1, 
+            //  - index = 0: 将对应下标(2个0和2个1)处合并
+            //  - index = 1: merge(classes[1], field_classes[0])，
+            //              因为父亲都到第二个8字节了，所以field也最多只有一个8字节
+            classes[current_eight_index] = merge_parameter_classes(
+                classes[current_eight_index],
+                field_class[0]
+            );
+
+            if (current_eight_index == 0) {
+                classes[1] = merge_parameter_classes(classes[1], field_class[1]);
+            }
+        }
+    }
+
+    std::array<zdb::ParameterClass, 2> classify_class_type(const zdb::Type& type) {
+        if (type.is_non_trivial_for_calls()) {
+            zdb::Error::send("NTFPOC types are not supported");
+        }
+
+        // 如果太大或字段未对齐，则直接按内存传
+        if (type.has_unaligned_fields() || type.byte_size() > 16) {
+            return {
+                zdb::ParameterClass::memory,
+                zdb::ParameterClass::memory
+            };
+        }
+
+        std::array<zdb::ParameterClass, 2> classes {
+            zdb::ParameterClass::no_class,
+            zdb::ParameterClass::no_class
+        };
+
+        // 将数组看作指向它元素类型的指针，因此里面放的是什么类型，按这个类型分类就行。长一点就复制用两块。
+        if (type.get_die().abbrev_entry()->tag == DW_TAG_array_type) {
+            zdb::Type elem_type = type.get_die()[DW_AT_type].as_type();
+            classes = elem_type.get_parameter_classes();
+            if (type.byte_size() > 8 && classes[1] == zdb::ParameterClass::no_class) {
+                classes[1] = classes[0];
+            }
+        } 
+        else {
+            for (auto child : type.get_die().children()) {
+                if (child.abbrev_entry()->tag == DW_TAG_member 
+                    && (child.contains(DW_AT_data_member_location) 
+                    || child.contains(DW_AT_data_bit_offset))
+                ) {
+                    classify_class_field(type, child, classes, 0);
+                }
+            }
+        }
+
+        if (classes[0] == zdb::ParameterClass::memory
+            || classes[1] == zdb::ParameterClass::memory
+        ) {
+            classes[0] = classes[1] = zdb::ParameterClass::memory;
+        }
+        else if (classes[1] == zdb::ParameterClass::x87up
+            && classes[0] != zdb::ParameterClass::x87
+        ) {
+            classes[0] = classes[1] = zdb::ParameterClass::memory;
+        }
+
+        return classes;
+    }
+
+    bool is_destructor(const zdb::DIE& func) {
+        auto name = func.name();
+        return name
+            && name.value().size() > 1
+            && name.value()[0] == '~';
+    }
+
+    // class MyClass {
+    // public:
+    //     MyClass(const MyClass&);        // 拷贝构造函数
+    //     MyClass(MyClass&&);             // 移动构造函数
+    // };
+    bool is_copy_or_move_constructor(
+        const zdb::Type& class_type, 
+        const zdb::DIE& func
+    ) {
+        auto class_name = class_type.get_die().name();
+        if (class_name != func.name()) return false;
+
+        int i = 0;
+        for (auto child : func.children()) {
+            if (child.abbrev_entry()->tag == DW_TAG_formal_parameter) {
+                if (i == 0) {
+                    auto child_type = child[DW_AT_type].as_type();
+                    // this指针
+                    if (child_type.get_die().abbrev_entry()->tag != DW_TAG_pointer_type)
+                        return false;
+                    // this指针指向自己类类型
+                    if (child_type.get_die()[DW_AT_type].as_type().strip_cv_typedef() != class_type)
+                        return false;
+                } 
+                else if (i == 1) {
+                    auto child_type = child[DW_AT_type].as_type();
+                    auto tag = child_type.get_die().abbrev_entry()->tag;
+
+                    if (tag != DW_TAG_reference_type && tag != DW_TAG_rvalue_reference_type)
+                        return false;
+
+                    auto ref = child_type.get_die()[DW_AT_type].as_type().strip_cv_typedef();
+                    if (ref != class_type)
+                        return false;
+                } else {
+                    return false;
+                }
+            }
+            i++;
+        }
+        return i == 2;
+    }
 };
 
 std::size_t zdb::Type::byte_size() const {
@@ -156,6 +347,17 @@ std::size_t zdb::Type::byte_size() const {
 }
 
 std::size_t zdb::Type::compute_byte_size() const {
+    if (!is_from_dwarf()) {
+        switch (get_builtin_type()) {
+            case BuiltinType::boolean: return 1;
+            case BuiltinType::character: return 1;
+            case BuiltinType::integer: return 8;
+            case BuiltinType::floating_point: return 8;
+            case BuiltinType::string: return 8;
+        }
+    }
+
+    auto& die_ = std::get<DIE>(info_);
     auto tag = die_.abbrev_entry()->tag;
 
     if (tag == DW_TAG_pointer_type) {
@@ -205,6 +407,83 @@ bool zdb::Type::is_char_type() const {
     auto encoding = stripped[DW_AT_encoding].as_int();
     return stripped.abbrev_entry()->tag == DW_TAG_base_type 
         && (encoding == DW_ATE_signed_char || encoding == DW_ATE_unsigned_char);
+}
+
+bool zdb::Type::is_class_type() const {
+    if (!is_from_dwarf()) return false;
+    auto stripped = strip_cv_typedef().get_die();
+    auto tag = stripped.abbrev_entry()->tag;
+
+    return tag == DW_TAG_class_type
+        || tag == DW_TAG_structure_type
+        || tag == DW_TAG_union_type;
+}
+
+bool zdb::Type::is_reference_type() const {
+    if (!is_from_dwarf()) return false;
+    auto stripped = strip_cv_typedef().get_die();
+    auto tag = stripped.abbrev_entry()->tag;
+    return tag == DW_TAG_reference_type
+        || tag == DW_TAG_rvalue_reference_type;
+}
+
+
+bool zdb::Type::operator==(const Type& rhs) const {
+    if (!is_from_dwarf() && !rhs.is_from_dwarf()) {
+        return get_builtin_type() == rhs.get_builtin_type();
+    }
+
+    const Type* from_dwarf = nullptr;
+    const Type* builtin = nullptr;
+    if (!is_from_dwarf()) {
+        from_dwarf = &rhs;
+        builtin = this;
+    }
+    else if (!rhs.is_from_dwarf()) {
+        from_dwarf = this;
+        builtin = &rhs;
+    }
+
+    if (from_dwarf && builtin) {
+        auto die = from_dwarf->strip_cvref_typedef().get_die();
+        auto tag = die.abbrev_entry()->tag;
+        if (tag == DW_TAG_base_type) {
+            switch (die[DW_AT_encoding].as_int()) {
+                case DW_ATE_boolean:
+                    return builtin->get_builtin_type() == BuiltinType::boolean;
+                case DW_ATE_float:
+                    return builtin->get_builtin_type() == BuiltinType::floating_point;
+                case DW_ATE_signed:
+                case DW_ATE_unsigned:
+                    return builtin->get_builtin_type() == BuiltinType::integer;
+                case DW_ATE_signed_char:
+                case DW_ATE_unsigned_char:
+                    return builtin->get_builtin_type() == BuiltinType::character;
+                default:
+                    return false;
+            }
+        }
+
+        // 对于指针类型，我们支持的唯一内置类型是字符串，
+        // 确保DWARF指针类型指向字符类型，并且内置类型是字符串
+        if (tag == DW_TAG_pointer_type) {
+            return die[DW_AT_type].as_type().is_char_type() &&
+                builtin->get_builtin_type() == BuiltinType::string;
+        }
+        return false;
+    }
+
+    // 两边都来自DIE.type
+    // 此处似乎存在问题，对于char*和char, 去掉指针后是一致的，但他们是两种不同的类型，需要测试
+    auto lhs_stripped = strip_all();
+    auto rhs_stripped = rhs.strip_all();
+    auto lhs_name = lhs_stripped.get_die().name();
+    auto rhs_name = rhs_stripped.get_die().name();
+    if (lhs_name && rhs_name && *lhs_name == *rhs_name) {
+        return true;
+    }
+
+    return false;
 }
 
 zdb::TypedData zdb::TypedData::fixup_bitfield(
@@ -337,4 +616,184 @@ zdb::TypedData zdb::TypedData::index(
         }
         return { std::move(element_data), element_type };
     }
+}
+
+std::size_t zdb::Type::alignment() const {
+    if (!is_from_dwarf()) {
+        return byte_size();
+    }
+
+    if (is_class_type()) {
+        std::size_t max_alignment = 0;
+        for (auto child : get_die().children()) {
+            if (child.abbrev_entry()->tag == DW_TAG_member
+                && (child.contains(DW_AT_data_member_location)
+                || child.contains(DW_AT_data_bit_offset))
+            ) {
+                zdb::Type member_type = child[DW_AT_type].as_type();
+                if (member_type.alignment() > max_alignment) {
+                    max_alignment = member_type.alignment();
+                }
+            }
+        }
+        return max_alignment;
+    }
+
+    if (get_die().abbrev_entry()->tag == DW_TAG_array_type) {
+        return get_die()[DW_AT_type].as_type().alignment();
+    }
+    
+    return byte_size();
+}
+
+// 检查参数是否有未对齐的字段
+bool zdb::Type::has_unaligned_fields() const {
+    if (!is_from_dwarf()) {
+        return false;
+    }
+
+    if (is_class_type()) {
+        for (auto child : get_die().children()) {
+            if (child.abbrev_entry()->tag == DW_TAG_member
+                && child.contains(DW_AT_data_member_location)
+            ) {
+                auto member_type = child[DW_AT_type].as_type();
+                if (child[DW_AT_data_member_location].as_int()
+                    % member_type.alignment() != 0) {
+                    return true;
+                }
+                if (member_type.has_unaligned_fields()) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+// 检查参数是否为NTFPOC. 对于NTFPOC类型，只支持指针传递
+// NTFPOC定义详见docs/NTFPOC.md
+bool zdb::Type::is_non_trivial_for_calls() const {
+    auto stripped = strip_cv_typedef().get_die();
+    auto tag = stripped.abbrev_entry()->tag;
+
+    if (tag == DW_TAG_array_type) {
+        return stripped[DW_AT_type].as_type().is_non_trivial_for_calls();
+    }
+
+    if (tag != DW_TAG_class_type
+        && tag != DW_TAG_structure_type
+        && tag != DW_TAG_union_type
+    ) {
+        return false;
+    }
+
+    for (auto& child : stripped.children()) {
+
+        // 非静态成员字段成员变量是否是NTFPOC
+        if (child.abbrev_entry()->tag == DW_TAG_member
+            && (child.contains(DW_AT_data_member_location)
+            || child.contains(DW_AT_data_bit_offset))
+        ) {
+            if (child[DW_AT_type].as_type().is_non_trivial_for_calls()) {
+                return true;
+            }
+        }
+
+        // 基类继承是否是
+        if (child.abbrev_entry()->tag == DW_TAG_inheritance) {
+            if (child[DW_AT_type].as_type().is_non_trivial_for_calls()) {
+                return true;
+            }
+        }
+
+        // 存在虚函数
+        if (child.contains(DW_AT_virtuality) 
+            && child[DW_AT_virtuality].as_int() != DW_VIRTUALITY_none
+        ) {
+            return true;
+        }
+        
+        
+        if (child.abbrev_entry()->tag == DW_TAG_subprogram 
+        ) { 
+            // 构造函数不是默认的
+            if (is_copy_or_move_constructor(*this, child)
+                && (!child.contains(DW_AT_defaulted)
+                || !child[DW_AT_defaulted].as_int() != DW_DEFAULTED_in_class)
+            ) {
+                return true;
+            }
+            else if (is_destructor(child)
+                && (!child.contains(DW_AT_defaulted)
+                || !child[DW_AT_defaulted].as_int() != DW_DEFAULTED_in_class)
+            ) {
+
+            }
+        }
+    }
+
+    return false;
+}
+
+std::array<zdb::ParameterClass, 2> zdb::Type::get_parameter_classes() const {
+    std::array<zdb::ParameterClass, 2> classes = {
+        zdb::ParameterClass::no_class, 
+        zdb::ParameterClass::no_class 
+    };
+
+    if (!is_from_dwarf()) {
+        switch (get_builtin_type()) {
+            case zdb::BuiltinType::boolean: 
+            case zdb::BuiltinType::character: 
+            case zdb::BuiltinType::integer: 
+            case zdb::BuiltinType::string: 
+                classes[0] = zdb::ParameterClass::integer; 
+                break;
+            case BuiltinType::floating_point: 
+                classes[0] = zdb::ParameterClass::sse; break;
+        }
+        return classes;
+    }
+
+    auto stripped = strip_cv_typedef();
+    auto die = stripped.get_die();
+    auto tag = die.abbrev_entry()->tag;
+    if (tag == DW_TAG_base_type && stripped.byte_size() <= 8) {
+        switch (die[DW_AT_encoding].as_int()) {
+        case DW_ATE_boolean:
+        case DW_ATE_signed:
+        case DW_ATE_signed_char:
+        case DW_ATE_unsigned:
+        case DW_ATE_unsigned_char: 
+            classes[0] = ParameterClass::integer; break;
+        case DW_ATE_float: 
+            // 不支持m256之类
+            classes[0] = ParameterClass::sse; break;
+        default: 
+            zdb::Error::send("Unimplemented base type encoding");
+        }
+    }
+    else if (tag == DW_TAG_pointer_type 
+        || tag == DW_TAG_reference_type 
+        || tag == DW_TAG_rvalue_reference_type
+    ) {
+        classes[0] = ParameterClass::integer;
+    }
+    else if (tag == DW_TAG_base_type
+        && die[DW_AT_encoding].as_int() == DW_ATE_float
+        && stripped.byte_size() == 16
+    ) {
+        classes[0] = ParameterClass::x87;
+        classes[1] = ParameterClass::x87up;
+    }
+    else if (tag == DW_TAG_class_type 
+        || tag == DW_TAG_structure_type
+        || tag == DW_TAG_union_type
+        || tag == DW_TAG_array_type
+    ) {
+        classes = classify_class_type(*this);
+    }
+    return classes;
 }

@@ -20,6 +20,7 @@ add_test_cpp_executable(step)
 add_test_cpp_executable(global_variable)
 add_test_cpp_executable(blocks)
 add_test_cpp_executable(member_pointer)
+add_test_cpp_executable(expr)
 add_test_cpp_executable(multi_threaded)
 target_link_libraries(multi_threaded pthread)
 
