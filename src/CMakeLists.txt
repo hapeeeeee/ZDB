@@ -1,5 +1,20 @@
-add_library(libzdb libzdb.cpp)
-
+add_library(libzdb 
+    process.cpp 
+    pipe.cpp 
+    registers.cpp 
+    breakpoint_site.cpp 
+    disassembler.cpp 
+    watchpoint.cpp 
+    syscall.cpp
+    elf.cpp
+    types.cpp
+    type.cpp
+    target.cpp
+    dwarf.cpp
+    stack.cpp
+    breakpoint.cpp
+)
+target_link_libraries(libzdb PRIVATE Zydis::Zydis fmt::fmt)
 add_library(zdb::libzdb ALIAS libzdb)
 
 set_target_properties(

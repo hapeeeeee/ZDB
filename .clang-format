@@ -10,3 +10,4 @@ AllowAllArgumentsOnNextLine: true
 AllowAllConstructorInitializersOnNextLine: true
 AllowAllParametersOfDeclarationOnNextLine: true
 BinPackArguments: false
+NamespaceIndentation: All

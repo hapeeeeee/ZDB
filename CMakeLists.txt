@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.19)
-project("zdb" LANGUAGES CXX)
+project("zdb" LANGUAGES CXX ASM)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libedit REQUIRED IMPORTED_TARGET libedit)
+find_package(fmt CONFIG REQUIRED)
+find_package(zydis CONFIG REQUIRED)
   
 include(CTest)
 add_subdirectory("src")
